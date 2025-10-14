@@ -11,8 +11,12 @@ for bamfile in "$BAM_DIR"/*.bam; do
     basename=$(basename "$bamfile" .bam)
     outfile="$FASTQ_DIR/${basename}.fastq.gz"
     
-    echo "Converting $bamfile -> $outfile"
-    samtools fastq -@ 8 "$bamfile" | gzip > "$outfile"
+    if [ -f "$outfile" ]; then
+        echo "Skipping $bamfile -> $outfile (already exists)"
+    else
+        echo "Converting $bamfile -> $outfile"
+        samtools fastq -@ 8 "$bamfile" | gzip > "$outfile"
+    fi
 done
 echo "✅ All BAM files converted to FASTQ.gz files"
 
@@ -28,8 +32,12 @@ for fastqfile in "$FASTQ_DIR"/*.fastq.gz; do
     pass_file="$FASTQ_DIR/${basename}_pass.fastq.gz"
     fail_file="$FASTQ_DIR/${basename}_fail.fastq.gz"
     
-    echo "Filtering reads in $fastqfile"
-    python /home/users/astar/gis/linxy/code/shapemap_util/nanopore/filter_reads_V2.py "$fastqfile" "$pass_file" "$fail_file"
+    if [ -f "$pass_file" ] && [ -f "$fail_file" ]; then
+        echo "Skipping $fastqfile (filtered files already exist)"
+    else
+        echo "Filtering reads in $fastqfile"
+        python /home/users/astar/gis/linxy/code/shapemap_util/nanopore/filter_reads_V2.py "$fastqfile" "$pass_file" "$fail_file"
+    fi
 done
 
 echo "✅ All FASTQ files have been filtered in: $FASTQ_DIR"
