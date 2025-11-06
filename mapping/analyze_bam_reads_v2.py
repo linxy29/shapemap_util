@@ -7,7 +7,10 @@ A comprehensive tool for analyzing BAM file read alignments with focus on:
 - Multi-mapping read analysis
 - Transcript assignment statistics
 - Read filtering by alignment quality
-- Extraction of uniquely mapped reads (new feature in v2)
+- Extraction of uniquely mapped reads (v2)
+- Extract the primary alignments (updated in v2.1)
+
+Version: v2.1
 
 Usage:
     python analyze_bam_reads_v2.py input.bam -o output_prefix
@@ -38,7 +41,7 @@ import pysam
 # Default parameters
 DEFAULT_OUTPUT_PREFIX = 'read_alignment_analysis'
 DEFAULT_MIN_LENGTH = 0
-PROGRESS_INTERVAL = 100000
+PROGRESS_INTERVAL = 1000000
 
 # Plot settings
 PLOT_DPI = 150
@@ -443,6 +446,7 @@ class FileHandler:
     ) -> None:
         """
         Write reads with unique transcript mappings to BAM file.
+        Only primary alignments are extracted (v2.1: skips secondary and supplementary alignments).
 
         Args:
             unique_read_ids: Set of read IDs that map to single unique transcript
@@ -450,13 +454,15 @@ class FileHandler:
             output_bam: Output BAM file path
             min_mapped_length: Minimum mapped length threshold
         """
-        logger.info(f"Writing unique reads to BAM: {output_bam}")
+        logger.info(f"Writing unique reads (primary alignments only) to BAM: {output_bam}")
 
         try:
             with pysam.AlignmentFile(str(input_bam), "rb") as infile:
                 with pysam.AlignmentFile(str(output_bam), "wb", template=infile) as outfile:
                     written_count = 0
                     total_checked = 0
+                    skipped_secondary = 0
+                    skipped_supplementary = 0
 
                     for alignment in infile:
                         total_checked += 1
@@ -469,8 +475,19 @@ class FileHandler:
                         if mapped_length < min_mapped_length:
                             continue
 
-                        # Write if in unique set
+                        # Write if in unique set AND is primary alignment
                         if alignment.query_name in unique_read_ids:
+                            # Skip secondary alignments (flag 0x100)
+                            if alignment.is_secondary:
+                                skipped_secondary += 1
+                                continue
+
+                            # Skip supplementary alignments (flag 0x800)
+                            if alignment.is_supplementary:
+                                skipped_supplementary += 1
+                                continue
+
+                            # Write primary alignment
                             outfile.write(alignment)
                             written_count += 1
 
@@ -478,7 +495,8 @@ class FileHandler:
                         if total_checked % PROGRESS_INTERVAL == 0:
                             logger.info(f"Checked {total_checked:,} alignments, written {written_count:,}")
 
-            logger.info(f"Wrote {written_count:,} alignment records from {len(unique_read_ids):,} unique reads")
+            logger.info(f"Wrote {written_count:,} primary alignment records from {len(unique_read_ids):,} unique reads")
+            logger.info(f"Skipped {skipped_secondary:,} secondary and {skipped_supplementary:,} supplementary alignments")
 
         except Exception as e:
             logger.error(f"Error writing BAM file: {e}")
