@@ -125,6 +125,7 @@ def read_mutrate_window_files(directory_path='.', pattern = "_counts_mutrate.10n
 def calculate_reactivity(signal_df, control_df, index_cols = ['gene', 'pos']):
     """
     Calculate reactivity as the difference between signal and control mutational rates.
+    Require mutrate and coverage columns in both dataframes as well as the index columns.
     
     Parameters:
     -----------

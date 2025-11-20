@@ -41,7 +41,7 @@ import pysam
 # Default parameters
 DEFAULT_OUTPUT_PREFIX = 'read_alignment_analysis'
 DEFAULT_MIN_LENGTH = 0
-PROGRESS_INTERVAL = 1000000
+PROGRESS_INTERVAL = 10000000
 
 # Plot settings
 PLOT_DPI = 150
