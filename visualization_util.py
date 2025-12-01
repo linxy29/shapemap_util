@@ -359,7 +359,8 @@ def get_df_with_normalized_reactivity(signal_df, control_df, index_cols=['gene',
             # Apply normalize_reactivity_zy to this group
             normalized_group = normalize_reactivity_zy(
                 df=group_data, 
-                reactivity_columns="reactivity"
+                reactivity_columns="reactivity",
+                index_col = [col for col in index_cols if col != "gene"]
             )
             normalized_groups.append(normalized_group)
         
