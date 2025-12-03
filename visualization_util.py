@@ -404,7 +404,7 @@ def plot_correlation(dataframe, index_col, group_col, value_col, output_file, ti
     
     # Create clustermap
     g = sns.clustermap(corr_df, cmap="coolwarm", annot=True, method='ward', 
-                       figsize=(10, 10), fmt='.2f', linewidths=0.5,
+                       figsize=(5, 5), fmt='.2f', linewidths=0.5,
                        cbar_kws={'label': f'Pearson Correlation'})
     
     # Adjust title position - include number of data points
