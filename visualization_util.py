@@ -417,7 +417,7 @@ def plot_correlation(dataframe, index_col, group_col, value_col, output_file, ti
     
     plt.show()
 
-def read_mutrate_files(directory_path='.', prefix ='', output_file=None, header=None, coverage_threshold=100):
+def read_mutrate_files(directory_path='.', prefix ='', output_file=None, header=None, coverage_threshold=100, mutrate_threshold=0.2):
     """
     Process all mutrate.txt and mutrate.txt.gz files in the specified directory.
 
@@ -435,6 +435,8 @@ def read_mutrate_files(directory_path='.', prefix ='', output_file=None, header=
          "coverage_withIndel", "mutant", "normalized_cov", "g_readcount", "refnt", "detail"]
     coverage_threshold : int, default 100
         Minimum coverage required. Rows with coverage below this threshold will be filtered out.
+    mutrate_threshold : float, default 0.2
+        Maximum mutrate allowed. Rows with mutrate above this threshold will be filtered out.
 
     Returns:
     --------
@@ -524,13 +526,17 @@ def read_mutrate_files(directory_path='.', prefix ='', output_file=None, header=
             # Filter by coverage threshold
             rows_before = len(subset_df)
             subset_df = subset_df[subset_df['coverage'] >= coverage_threshold]
+            rows_after_coverage = len(subset_df)
+
+            # Filter by mutrate threshold
+            subset_df = subset_df[subset_df['mutrate'] <= mutrate_threshold]
             rows_after = len(subset_df)
 
             # Reorder columns to put sample first
             subset_df = subset_df[['sample', 'gene', 'pos', 'mutrate', 'coverage', 'mutant']]
 
             all_data.append(subset_df)
-            print(f"  - Added {rows_after} rows from {sample_name} (filtered {rows_before - rows_after} rows with coverage < {coverage_threshold})")
+            print(f"  - Added {rows_after} rows from {sample_name} (filtered {rows_before - rows_after_coverage} rows with coverage < {coverage_threshold}, {rows_after_coverage - rows_after} rows with mutrate > {mutrate_threshold})")
             
         except Exception as e:
             print(f"Error processing {file_path}: {str(e)}")
