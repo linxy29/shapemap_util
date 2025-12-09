@@ -417,7 +417,7 @@ def plot_correlation(dataframe, index_col, group_col, value_col, output_file, ti
     
     plt.show()
 
-def read_mutrate_files(directory_path='.', prefix ='', output_file=None, header=None):
+def read_mutrate_files(directory_path='.', prefix ='', output_file=None, header=None, coverage_threshold=100):
     """
     Process all mutrate.txt and mutrate.txt.gz files in the specified directory.
 
@@ -433,6 +433,8 @@ def read_mutrate_files(directory_path='.', prefix ='', output_file=None, header=
         Column names to use if the file has no header. Default is:
         ["gene", "pos", "pos+1", "gene.position", "mutrate", "strand", "coverage",
          "coverage_withIndel", "mutant", "normalized_cov", "g_readcount", "refnt", "detail"]
+    coverage_threshold : int, default 100
+        Minimum coverage required. Rows with coverage below this threshold will be filtered out.
 
     Returns:
     --------
@@ -518,12 +520,17 @@ def read_mutrate_files(directory_path='.', prefix ='', output_file=None, header=
             # Extract required columns and add sample column
             subset_df = df[required_cols].copy()
             subset_df['sample'] = sample_name
-            
+
+            # Filter by coverage threshold
+            rows_before = len(subset_df)
+            subset_df = subset_df[subset_df['coverage'] >= coverage_threshold]
+            rows_after = len(subset_df)
+
             # Reorder columns to put sample first
             subset_df = subset_df[['sample', 'gene', 'pos', 'mutrate', 'coverage', 'mutant']]
-            
+
             all_data.append(subset_df)
-            print(f"  - Added {len(subset_df)} rows from {sample_name}")
+            print(f"  - Added {rows_after} rows from {sample_name} (filtered {rows_before - rows_after} rows with coverage < {coverage_threshold})")
             
         except Exception as e:
             print(f"Error processing {file_path}: {str(e)}")
