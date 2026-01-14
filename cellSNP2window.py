@@ -15,7 +15,7 @@ import gzip
 from collections import defaultdict
 
 __doc__="""
-Calculate sliding window mutation rates from cellSNP VCF files.
+Calculate sliding window mutation rates from cellSNP VCF files. Make step size and window size the same to fix window mode.
 
 Description:
     This script reads a cellSNP VCF file using pysam, calculates mutation rates

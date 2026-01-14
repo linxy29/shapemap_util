@@ -209,5 +209,6 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     main(args)
+    print("Windows' mutation rates calculation completed successfully.")
     # Uncomment below for testing
     #main(argparse.Namespace(input_file="/home/users/astar/gis/linxy/scratch/data/spatial_shapemap/4th_Round/2A3/basecount_per_cluster/1.0_counts_mutrate.txt", output_file="/home/users/astar/gis/linxy/scratch/data/spatial_shapemap/4th_Round/2A3/basecount_per_cluster/1.0_counts_mutrate.10nt.csv.gz", win_len=10, step=10, threshold=100))

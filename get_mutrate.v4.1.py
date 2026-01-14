@@ -362,3 +362,5 @@ if __name__ == "__main__":
                      max_del_len=int(args.del_len),
                      equal_symbol_ref=args.ref_symbol,
                     )
+    
+    print("Mutation rates calculation completed successfully.")
