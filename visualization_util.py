@@ -122,7 +122,7 @@ def read_mutrate_window_files(directory_path='.', pattern = "_counts_mutrate.10n
     
     return final_df
 
-def calculate_reactivity(signal_df, control_df, index_cols = ['gene', 'pos']):
+def calculate_reactivity(signal_df, control_df, index_cols = ['gene', 'pos'], keep_cols=[]):
     """
     Calculate reactivity as the difference between signal and control mutational rates.
     Require mutrate and coverage columns in both dataframes as well as the index columns.
@@ -159,17 +159,37 @@ def calculate_reactivity(signal_df, control_df, index_cols = ['gene', 'pos']):
     merged_df['reactivity'] = merged_df['mutrate_signal'] - merged_df['mutrate_control']
     
     # Select relevant columns to return
-    result_df = merged_df[index_cols + ['mutrate_signal', 'mutrate_control', 'reactivity', 'coverage_signal', 'coverage_control']]
+    result_df = merged_df[index_cols + ['mutrate_signal', 'mutrate_control', 'reactivity', 'coverage_signal', 'coverage_control'] + keep_cols]
     
     return result_df
 
-def gene_normalization_1nt(crude_reac, bottom_winsorize=0.0, top_winsorize=0.0, 
+def gene_normalization_1nt(crude_reac, bottom_winsorize=0.0, top_winsorize=0.0,
                           transcriptome_winsorize=False, gene_winsorize=False):
-    ## transcriptome-wide winsorization
+    """
+    Normalize reactivity values at 1nt resolution using gene-level normalization.
+
+    Parameters:
+    -----------
+    crude_reac : pd.DataFrame
+        DataFrame with multi-index (gene, position) and reactivity columns
+    bottom_winsorize : float, default 0.0
+        Bottom percentile for winsorization (0.0 to 1.0)
+    top_winsorize : float, default 0.0
+        Top percentile for winsorization (0.0 to 1.0)
+    transcriptome_winsorize : bool, default False
+        Whether to apply transcriptome-wide winsorization
+    gene_winsorize : bool, default False
+        Whether to apply gene-level winsorization
+
+    Returns:
+    --------
+    pd.DataFrame
+        DataFrame with normalized reactivity values
+    """
+    import numpy as np
+    import pandas as pd
     from scipy.stats import stats
     from scipy.stats.mstats import winsorize
-    import pandas as pd
-    import numpy as np
 
     crude_reac_array = crude_reac.to_numpy()
     if transcriptome_winsorize:

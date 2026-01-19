@@ -568,3 +568,112 @@ def read_window_vcf_to_sparse(vcf_file, progress_interval=100000):
     print(f"Mutation rate matrix shape: {mut_sparse.shape}")
 
     return cov_sparse, mut_sparse, position_info, col_names
+
+def read_paired_vcf_to_sparse(rRNA_win_path, steptwo_win_path, progress_interval=100000):
+    """
+    Read paired rRNA and steptwo VCF files and concatenate them.
+    
+    Parameters:
+    -----------
+    rRNA_win_path : str
+        Path to rRNA VCF file
+    steptwo_win_path : str
+        Path to steptwo VCF file
+    progress_interval : int, default=100000
+        Print progress every N variants
+        
+    Returns:
+    --------
+    tuple: (coverage_sparse, mutrate_sparse, position_info, col_names)
+        - coverage_sparse: scipy.sparse.csr_matrix with concatenated DP values
+        - mutrate_sparse: scipy.sparse.csr_matrix with concatenated MR values
+        - position_info: pandas.DataFrame with concatenated position info
+        - col_names: list of cell/sample names (should be identical for both)
+    """
+    from scipy import sparse
+    import pandas as pd
+    
+    print("=" * 80)
+    print("Reading rRNA VCF file...")
+    print("=" * 80)
+    cov_rRNA, mut_rRNA, pos_rRNA, cells_rRNA = read_window_vcf_to_sparse(
+        rRNA_win_path, progress_interval
+    )
+    
+    print("\n" + "=" * 80)
+    print("Reading steptwo VCF file...")
+    print("=" * 80)
+    cov_steptwo, mut_steptwo, pos_steptwo, cells_steptwo = read_window_vcf_to_sparse(
+        steptwo_win_path, progress_interval
+    )
+    
+    # Verify that cell names match
+    if cells_rRNA != cells_steptwo:
+        raise ValueError(
+            f"Cell names don't match between rRNA and steptwo files!\n"
+            f"rRNA cells: {len(cells_rRNA)}, steptwo cells: {len(cells_steptwo)}"
+        )
+    
+    print("\n" + "=" * 80)
+    print("Concatenating matrices...")
+    print("=" * 80)
+    
+    # Concatenate sparse matrices vertically (row-wise)
+    cov_combined = sparse.vstack([cov_rRNA, cov_steptwo], format='csr')
+    mut_combined = sparse.vstack([mut_rRNA, mut_steptwo], format='csr')
+    
+    # Concatenate position info
+    pos_combined = pd.concat([pos_rRNA, pos_steptwo], axis=0, ignore_index=False)
+    
+    print(f"Combined coverage matrix shape: {cov_combined.shape}")
+    print(f"Combined mutation rate matrix shape: {mut_combined.shape}")
+    print(f"Combined position info shape: {pos_combined.shape}")
+    print(f"Total windows: {len(pos_combined):,}")
+    print("=" * 80)
+    
+    return cov_combined, mut_combined, pos_combined, cells_rRNA
+
+
+def read_multiple_paired_vcf_to_dict(sample_paths_dict, progress_interval=100000):
+    """
+    Read multiple samples with paired rRNA and steptwo VCF files.
+    
+    Parameters:
+    -----------
+    sample_paths_dict : dict
+        Dictionary with sample names as keys and tuples of (rRNA_path, steptwo_path) as values
+        Example: {
+            'DM_PIP_DMSO_3in4': (rRNA_path, steptwo_path),
+            'DM_PIP_NAIN3_3in4': (rRNA_path, steptwo_path)
+        }
+    progress_interval : int, default=100000
+        Print progress every N variants
+        
+    Returns:
+    --------
+    dict: Dictionary with sample names as keys and tuples of 
+          (coverage_sparse, mutrate_sparse, position_info, col_names) as values
+    """
+    results = {}
+    
+    for sample_name, (rRNA_path, steptwo_path) in sample_paths_dict.items():
+        print("\n" + "=" * 80)
+        print(f"PROCESSING SAMPLE: {sample_name}")
+        print("=" * 80)
+        
+        try:
+            cov, mut, pos, cells = read_paired_vcf_to_sparse(
+                rRNA_path, steptwo_path, progress_interval
+            )
+            results[sample_name] = (cov, mut, pos, cells)
+            
+            print(f"\n✓ Successfully processed {sample_name}")
+            print(f"  - Windows: {pos.shape[0]:,}")
+            print(f"  - Cells: {len(cells):,}")
+            print(f"  - Coverage non-zeros: {cov.nnz:,}")
+            
+        except Exception as e:
+            print(f"\n✗ Error processing {sample_name}: {str(e)}")
+            raise
+    
+    return results
