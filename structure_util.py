@@ -1,5 +1,120 @@
 ## This file contains helper functions that are used when analyzing structure data
 
+def filter_data_with_cellinfo(coverage_sparse, mutrate_sparse, genepos, cells_df,
+                               cell_filters=None):
+    """
+    Filter sparse matrices based on cell metadata and identify all-NA cells/windows.
+
+    Parameters:
+    -----------
+    coverage_sparse : scipy.sparse.csr_matrix
+        Coverage matrix (positions x cells)
+    mutrate_sparse : scipy.sparse.csr_matrix
+        Mutation rate matrix (positions x cells)
+    genepos : pd.DataFrame or list
+        Position identifiers
+    cells_df : pd.DataFrame
+        Cell information dataframe with cell names as index.
+        Example columns: n_windows, leiden, Total
+    cell_filters : dict, optional
+        Dictionary of column filters. Keys are column names, values can be:
+        - single value: exact match (e.g., {'leiden': 'K562'})
+        - list: membership (e.g., {'leiden': ['K562', 'HEK293T']})
+        - tuple of (min, max): range filter (e.g., {'n_windows': (1000, 50000)})
+          Use None for open-ended ranges: (1000, None) for >= 1000
+
+    Returns:
+    --------
+    tuple: (filtered_coverage, filtered_mutrate, filtered_genepos, filtered_cells_df)
+    """
+    import numpy as np
+    import pandas as pd
+    from scipy import sparse
+
+    # Ensure cells_df has cell names as index
+    if cells_df.index.name != 'cell' and 'cell' in cells_df.columns:
+        cells_df = cells_df.set_index('cell')
+
+    print(f"Original shape: {coverage_sparse.shape}")
+    print(f"Original cells: {len(cells_df)}")
+
+    # Store original cell list for index mapping
+    original_cell_list = cells_df.index.tolist()
+
+    # Step 1: Apply cell metadata filters
+    if cell_filters:
+        print(f"\nApplying cell filters: {cell_filters}")
+        cell_mask = pd.Series(True, index=cells_df.index)
+
+        for col, condition in cell_filters.items():
+            if col not in cells_df.columns:
+                print(f"  Warning: column '{col}' not found in cells_df, skipping")
+                continue
+
+            if isinstance(condition, tuple) and len(condition) == 2:
+                # Range filter (min, max)
+                min_val, max_val = condition
+                if min_val is not None:
+                    cell_mask &= (cells_df[col] >= min_val)
+                if max_val is not None:
+                    cell_mask &= (cells_df[col] <= max_val)
+                print(f"  {col}: range [{min_val}, {max_val}]")
+            elif isinstance(condition, list):
+                # Membership filter
+                cell_mask &= cells_df[col].isin(condition)
+                print(f"  {col}: in {condition}")
+            else:
+                # Exact match
+                cell_mask &= (cells_df[col] == condition)
+                print(f"  {col}: == {condition}")
+
+        # Get indices of cells that pass metadata filters
+        cells_passing_filter = cells_df[cell_mask].index.tolist()
+        valid_cell_indices = [original_cell_list.index(c) for c in cells_passing_filter]
+
+        print(f"Cells after metadata filter: {len(cells_passing_filter)}")
+
+        # Handle empty result
+        if len(valid_cell_indices) == 0:
+            print("Warning: No cells pass the metadata filters!")
+            empty_genepos = pd.DataFrame() if isinstance(genepos, pd.DataFrame) else []
+            return (sparse.csr_matrix((0, 0)), sparse.csr_matrix((0, 0)),
+                    empty_genepos, cells_df.iloc[0:0])
+
+        # Subset matrices to only include filtered cells
+        filtered_coverage = coverage_sparse[:, valid_cell_indices]
+        filtered_mutrate = mutrate_sparse[:, valid_cell_indices]
+        filtered_cells_df = cells_df.loc[cells_passing_filter].copy()
+    else:
+        # No cell filters, use all data
+        filtered_coverage = coverage_sparse.copy()
+        filtered_mutrate = mutrate_sparse.copy()
+        filtered_cells_df = cells_df.copy()
+
+    # Filter genepos to match (keep all positions for now)
+    if isinstance(genepos, pd.DataFrame):
+        filtered_genepos = genepos.copy()
+    elif isinstance(genepos, (pd.Series, pd.Index)):
+        filtered_genepos = genepos.copy()
+    else:
+        filtered_genepos = list(genepos)
+
+    # Step 2: Calculate and print all-NA cells and windows
+    cov_csr = filtered_coverage.tocsr()
+    row_nnz = np.diff(cov_csr.indptr)  # number of non-zeros per row
+    n_all_na_windows = np.sum(row_nnz == 0)
+
+    cov_csc = filtered_coverage.tocsc()
+    col_nnz = np.diff(cov_csc.indptr)  # number of non-zeros per column
+    n_all_na_cells = np.sum(col_nnz == 0)
+
+    print(f"All-NA cells: {n_all_na_cells} / {len(filtered_cells_df)}")
+    print(f"All-NA windows: {n_all_na_windows} / {filtered_coverage.shape[0]}")
+    print(f"Filtered shape: {filtered_coverage.shape}")
+
+    return filtered_coverage, filtered_mutrate, filtered_genepos, filtered_cells_df
+
+
 def filter_sparse_data(coverage_sparse, mutrate_sparse, genepos, cells, 
                        coverage_threshold, mutrate_threshold):
     """
