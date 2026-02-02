@@ -1,9 +1,9 @@
 ## This file contains helper functions that are used when analyzing structure data
 
-def filter_data_with_cellinfo(coverage_sparse, mutrate_sparse, genepos, cells_df,
-                               cell_filters=None):
+def filter_data_with_cellinfo(coverage_sparse, mutrate_sparse, genepos, cells,
+                               cell_filters=None, cell_indices=None):
     """
-    Filter sparse matrices based on cell metadata and identify all-NA cells/windows.
+    Filter sparse matrices based on cell metadata, barcode list, or indices.
 
     Parameters:
     -----------
@@ -13,37 +13,109 @@ def filter_data_with_cellinfo(coverage_sparse, mutrate_sparse, genepos, cells_df
         Mutation rate matrix (positions x cells)
     genepos : pd.DataFrame or list
         Position identifiers
-    cells_df : pd.DataFrame
-        Cell information dataframe with cell names as index.
-        Example columns: n_windows, leiden, Total
+    cells : pd.DataFrame, list, or array-like
+        Cell information. Can be:
+        - pd.DataFrame: Cell metadata with cell names as index (supports cell_filters)
+        - list/array: Simple list of cell barcodes (use cell_indices to filter)
     cell_filters : dict, optional
-        Dictionary of column filters. Keys are column names, values can be:
+        Dictionary of column filters (only works when cells is a DataFrame).
+        Keys are column names, values can be:
         - single value: exact match (e.g., {'leiden': 'K562'})
         - list: membership (e.g., {'leiden': ['K562', 'HEK293T']})
         - tuple of (min, max): range filter (e.g., {'n_windows': (1000, 50000)})
           Use None for open-ended ranges: (1000, None) for >= 1000
+    cell_indices : list, array, or callable, optional
+        Direct index-based filtering (works with both DataFrame and list cells).
+        Can be:
+        - list/array of integers: indices of cells to keep
+        - list/array of booleans: boolean mask (True = keep)
+        - list of strings: cell barcodes to keep
+        - callable: function that takes cells and returns indices or mask
 
     Returns:
     --------
-    tuple: (filtered_coverage, filtered_mutrate, filtered_genepos, filtered_cells_df)
+    tuple: (filtered_coverage, filtered_mutrate, filtered_genepos, filtered_cells)
+        - filtered_cells: DataFrame if input was DataFrame, list if input was list
+
+    Examples:
+    ---------
+    # With DataFrame and metadata filters:
+    filter_data_with_cellinfo(cov, mut, genepos, cells_df,
+                               cell_filters={'leiden': 'K562'})
+
+    # With list of barcodes and index filter:
+    filter_data_with_cellinfo(cov, mut, genepos, barcode_list,
+                               cell_indices=[0, 1, 5, 10])  # keep these indices
+
+    # With list of barcodes and barcode filter:
+    filter_data_with_cellinfo(cov, mut, genepos, barcode_list,
+                               cell_indices=['AAACCTGCAGTC', 'AAACCTGCAGTT'])
+
+    # With boolean mask:
+    mask = [True, False, True, ...]  # same length as cells
+    filter_data_with_cellinfo(cov, mut, genepos, barcode_list, cell_indices=mask)
+
+    # With callable:
+    filter_data_with_cellinfo(cov, mut, genepos, barcode_list,
+                               cell_indices=lambda x: [i for i, c in enumerate(x) if 'K562' in c])
     """
     import numpy as np
     import pandas as pd
     from scipy import sparse
 
-    # Ensure cells_df has cell names as index
-    if cells_df.index.name != 'cell' and 'cell' in cells_df.columns:
-        cells_df = cells_df.set_index('cell')
+    # Determine if cells is a DataFrame or a list
+    cells_is_df = isinstance(cells, pd.DataFrame)
+
+    if cells_is_df:
+        cells_df = cells.copy()
+        # Ensure cells_df has cell names as index
+        if cells_df.index.name != 'cell' and 'cell' in cells_df.columns:
+            cells_df = cells_df.set_index('cell')
+        original_cell_list = cells_df.index.tolist()
+        n_original_cells = len(cells_df)
+    else:
+        # Convert list to simple list if needed
+        original_cell_list = list(cells)
+        n_original_cells = len(original_cell_list)
+        cells_df = None  # Will create later if needed
 
     print(f"Original shape: {coverage_sparse.shape}")
-    print(f"Original cells: {len(cells_df)}")
+    print(f"Original cells: {n_original_cells}")
 
-    # Store original cell list for index mapping
-    original_cell_list = cells_df.index.tolist()
+    # Determine valid cell indices based on filters
+    valid_cell_indices = None
 
-    # Step 1: Apply cell metadata filters
-    if cell_filters:
-        print(f"\nApplying cell filters: {cell_filters}")
+    # Step 1: Apply cell_indices filter (works for both DataFrame and list)
+    if cell_indices is not None:
+        print(f"\nApplying cell_indices filter...")
+
+        if callable(cell_indices):
+            # callable: call function with cells to get indices
+            cell_indices = cell_indices(original_cell_list)
+
+        cell_indices = np.asarray(cell_indices)
+
+        if cell_indices.dtype == bool:
+            # Boolean mask
+            if len(cell_indices) != n_original_cells:
+                raise ValueError(f"Boolean mask length ({len(cell_indices)}) must match "
+                               f"number of cells ({n_original_cells})")
+            valid_cell_indices = np.where(cell_indices)[0].tolist()
+            print(f"  Boolean mask: {sum(cell_indices)} cells selected")
+        elif cell_indices.dtype.kind in ['U', 'S', 'O']:
+            # String array (barcodes)
+            barcode_set = set(cell_indices)
+            valid_cell_indices = [i for i, c in enumerate(original_cell_list)
+                                  if c in barcode_set]
+            print(f"  Barcode filter: {len(valid_cell_indices)} cells matched")
+        else:
+            # Integer indices
+            valid_cell_indices = cell_indices.tolist()
+            print(f"  Index filter: {len(valid_cell_indices)} cells selected")
+
+    # Step 2: Apply cell_filters (only works for DataFrame)
+    if cell_filters and cells_is_df:
+        print(f"\nApplying cell metadata filters: {cell_filters}")
         cell_mask = pd.Series(True, index=cells_df.index)
 
         for col, condition in cell_filters.items():
@@ -70,26 +142,49 @@ def filter_data_with_cellinfo(coverage_sparse, mutrate_sparse, genepos, cells_df
 
         # Get indices of cells that pass metadata filters
         cells_passing_filter = cells_df[cell_mask].index.tolist()
-        valid_cell_indices = [original_cell_list.index(c) for c in cells_passing_filter]
+        metadata_indices = [original_cell_list.index(c) for c in cells_passing_filter]
+        print(f"  Cells after metadata filter: {len(metadata_indices)}")
 
-        print(f"Cells after metadata filter: {len(cells_passing_filter)}")
+        # Combine with cell_indices if both are specified
+        if valid_cell_indices is not None:
+            # Intersection of both filters
+            valid_cell_indices = sorted(set(valid_cell_indices) & set(metadata_indices))
+            print(f"  Cells after combining filters: {len(valid_cell_indices)}")
+        else:
+            valid_cell_indices = metadata_indices
 
+    elif cell_filters and not cells_is_df:
+        print("Warning: cell_filters ignored because cells is not a DataFrame")
+
+    # Step 3: Apply filtering or keep all
+    if valid_cell_indices is not None:
         # Handle empty result
         if len(valid_cell_indices) == 0:
-            print("Warning: No cells pass the metadata filters!")
+            print("Warning: No cells pass the filters!")
             empty_genepos = pd.DataFrame() if isinstance(genepos, pd.DataFrame) else []
-            return (sparse.csr_matrix((0, 0)), sparse.csr_matrix((0, 0)),
-                    empty_genepos, cells_df.iloc[0:0])
+            if cells_is_df:
+                return (sparse.csr_matrix((0, 0)), sparse.csr_matrix((0, 0)),
+                        empty_genepos, cells_df.iloc[0:0])
+            else:
+                return (sparse.csr_matrix((0, 0)), sparse.csr_matrix((0, 0)),
+                        empty_genepos, [])
 
         # Subset matrices to only include filtered cells
         filtered_coverage = coverage_sparse[:, valid_cell_indices]
         filtered_mutrate = mutrate_sparse[:, valid_cell_indices]
-        filtered_cells_df = cells_df.loc[cells_passing_filter].copy()
+
+        if cells_is_df:
+            filtered_cells = cells_df.iloc[valid_cell_indices].copy()
+        else:
+            filtered_cells = [original_cell_list[i] for i in valid_cell_indices]
     else:
-        # No cell filters, use all data
+        # No filters, use all data
         filtered_coverage = coverage_sparse.copy()
         filtered_mutrate = mutrate_sparse.copy()
-        filtered_cells_df = cells_df.copy()
+        if cells_is_df:
+            filtered_cells = cells_df.copy()
+        else:
+            filtered_cells = original_cell_list.copy()
 
     # Filter genepos to match (keep all positions for now)
     if isinstance(genepos, pd.DataFrame):
@@ -99,7 +194,7 @@ def filter_data_with_cellinfo(coverage_sparse, mutrate_sparse, genepos, cells_df
     else:
         filtered_genepos = list(genepos)
 
-    # Step 2: Calculate and print all-NA cells and windows
+    # Step 4: Calculate and print all-NA cells and windows
     cov_csr = filtered_coverage.tocsr()
     row_nnz = np.diff(cov_csr.indptr)  # number of non-zeros per row
     n_all_na_windows = np.sum(row_nnz == 0)
@@ -108,11 +203,12 @@ def filter_data_with_cellinfo(coverage_sparse, mutrate_sparse, genepos, cells_df
     col_nnz = np.diff(cov_csc.indptr)  # number of non-zeros per column
     n_all_na_cells = np.sum(col_nnz == 0)
 
-    print(f"All-NA cells: {n_all_na_cells} / {len(filtered_cells_df)}")
+    n_filtered_cells = len(filtered_cells) if isinstance(filtered_cells, list) else len(filtered_cells)
+    print(f"\nAll-NA cells: {n_all_na_cells} / {n_filtered_cells}")
     print(f"All-NA windows: {n_all_na_windows} / {filtered_coverage.shape[0]}")
     print(f"Filtered shape: {filtered_coverage.shape}")
 
-    return filtered_coverage, filtered_mutrate, filtered_genepos, filtered_cells_df
+    return filtered_coverage, filtered_mutrate, filtered_genepos, filtered_cells
 
 
 def filter_sparse_data(coverage_sparse, mutrate_sparse, genepos, cells, 

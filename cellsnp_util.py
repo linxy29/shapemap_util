@@ -176,14 +176,15 @@ def read_cellsnp_vcf_to_matrices_pysam_sparse(vcf_gz_file, progress_interval=100
 
     Returns:
     --------
-    tuple: (coverage_sparse, mutrate_sparse, row_ids, col_names)
+    tuple: (coverage_sparse, mutrate_sparse, position_info, col_names)
         - coverage_sparse: scipy.sparse.csr_matrix with coverage values
         - mutrate_sparse: scipy.sparse.csr_matrix with mutation rates
-        - row_ids: list of position identifiers (chrom.pos)
+        - position_info: pandas.DataFrame with columns ['gene', 'pos', 'ref']
         - col_names: list of cell/sample names
     """
     import pysam
     import numpy as np
+    import pandas as pd
     from scipy import sparse
 
     print(f"Reading VCF file (sparse mode): {vcf_gz_file}")
@@ -193,12 +194,16 @@ def read_cellsnp_vcf_to_matrices_pysam_sparse(vcf_gz_file, progress_interval=100
     n_cells = len(samples)
     print(f"Found {n_cells} cells")
 
-    row_ids = []
+    genes = []
+    positions = []
+    refs = []
     cov_data, cov_rows, cov_cols = [], [], []
     mut_data, mut_rows, mut_cols = [], [], []
 
     for i, record in enumerate(vcf):
-        row_ids.append(f"{record.chrom}.{record.pos}")
+        genes.append(record.chrom)
+        positions.append(record.pos)
+        refs.append(record.ref)
 
         for cell_idx, sample_name in enumerate(samples):
             sample = record.samples[sample_name]
@@ -230,7 +235,7 @@ def read_cellsnp_vcf_to_matrices_pysam_sparse(vcf_gz_file, progress_interval=100
             print(f"  Processed {i + 1:,} variants...")
 
     vcf.close()
-    n_variants = len(row_ids)
+    n_variants = len(genes)
 
     print(f"Parsed {n_variants:,} positions")
     print(f"Non-zero entries: {len(cov_data):,}")
@@ -246,6 +251,14 @@ def read_cellsnp_vcf_to_matrices_pysam_sparse(vcf_gz_file, progress_interval=100
         shape=(n_variants, n_cells), dtype=np.float32
     )
 
+    # Create position_info DataFrame (similar to read_window_vcf_to_sparse)
+    position_info = pd.DataFrame({
+        'gene': genes,
+        'pos': positions,
+        'ref': refs
+    })
+    position_info.index = [f"{g}.{p}" for g, p in zip(genes, positions)]
+
     # Memory estimate
     cov_mem = (cov_sparse.data.nbytes + cov_sparse.indices.nbytes + cov_sparse.indptr.nbytes) / 1e9
     mut_mem = (mut_sparse.data.nbytes + mut_sparse.indices.nbytes + mut_sparse.indptr.nbytes) / 1e9
@@ -256,7 +269,7 @@ def read_cellsnp_vcf_to_matrices_pysam_sparse(vcf_gz_file, progress_interval=100
     print(f"Coverage matrix shape: {cov_sparse.shape}")
     print(f"Mutation rate matrix shape: {mut_sparse.shape}")
 
-    return cov_sparse, mut_sparse, row_ids, samples
+    return cov_sparse, mut_sparse, position_info, samples
 
 
 def read_cellsnp_base_vcf(vcf_file, include_oth=False, min_coverage=100):
