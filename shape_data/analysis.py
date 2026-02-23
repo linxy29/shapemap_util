@@ -619,6 +619,7 @@ def get_position_stats(
     Adds the following columns to data.genepos:
         - n_cells: number of cells with data
         - mean_coverage: mean coverage across cells
+        - min_coverage: minimum coverage across cells with data
         - mean_mutrate: mean mutation rate across cells
 
     Parameters:
@@ -640,6 +641,19 @@ def get_position_stats(
     cov_sum = np.array(data.coverage.sum(axis=1)).flatten()
     mean_coverage = np.divide(cov_sum, n_cells, where=n_cells > 0, out=np.zeros_like(cov_sum, dtype=float))
 
+    # Min coverage per position (minimum across cells that have data, i.e. coverage > 0)
+    from scipy import sparse
+    cov = data.coverage
+    if sparse.issparse(cov):
+        # Replace 0 with NaN to ignore cells without data, then take row min
+        cov_dense = cov.toarray().astype(float)
+    else:
+        cov_dense = np.array(cov, dtype=float)
+    cov_dense[cov_dense == 0] = np.nan
+    with np.errstate(all='ignore'):
+        min_coverage = np.nanmin(cov_dense, axis=1)
+    min_coverage = np.where(np.isnan(min_coverage), 0, min_coverage)
+
     # Mean mutation rate per position
     mut_sum = np.array(data.mutrate.sum(axis=1)).flatten()
     mean_mutrate = np.divide(mut_sum, n_cells, where=n_cells > 0, out=np.zeros_like(mut_sum, dtype=float))
@@ -648,19 +662,21 @@ def get_position_stats(
     if isinstance(data.genepos, pd.DataFrame):
         data.genepos['n_cells'] = n_cells
         data.genepos['mean_coverage'] = mean_coverage
+        data.genepos['min_coverage'] = min_coverage
         data.genepos['mean_mutrate'] = mean_mutrate
         if verbose:
-            print(f"Added columns to genepos metadata: n_cells, mean_coverage, mean_mutrate")
+            print(f"Added columns to genepos metadata: n_cells, mean_coverage, min_coverage, mean_mutrate")
     else:
         # Convert to DataFrame first
         data.genepos = pd.DataFrame({
             'position': data.genepos,
             'n_cells': n_cells,
             'mean_coverage': mean_coverage,
+            'min_coverage': min_coverage,
             'mean_mutrate': mean_mutrate
         })
         if verbose:
-            print(f"Converted genepos to DataFrame and added: n_cells, mean_coverage, mean_mutrate")
+            print(f"Converted genepos to DataFrame and added: n_cells, mean_coverage, min_coverage, mean_mutrate")
 
 
 def calculate_auroc(

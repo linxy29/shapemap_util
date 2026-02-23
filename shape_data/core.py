@@ -768,6 +768,7 @@ class ShapeData:
         Adds the following columns to self.genepos:
             - n_cells: number of cells with data
             - mean_coverage: mean coverage across cells
+            - min_coverage: minimum coverage across cells with data
             - mean_mutrate: mean mutation rate across cells
 
         Parameters:
