@@ -7,11 +7,10 @@
 ## Key optimizations: parallel I/O, vectorized cell calculations, no repeated scans.
 
 import argparse
+import os
 import pysam
-import gzip
 import numpy as np
 from multiprocessing import Pool, cpu_count
-from functools import partial
 
 __doc__="""
 Calculate sliding window mutation rates from cellSNP VCF files (Parallel Version).
@@ -34,7 +33,7 @@ Input:
 
 Output:
     Gzipped VCF file with one row per window, all cells as sample columns.
-    FORMAT: DP:AD:MR (coverage, mutant, mutrate)
+    FORMAT: DP:AD:MR:NP (coverage, mutant, mutrate, number of positions)
 
 Usage:
     python cellSNP2window_v3.py -i cellSNP.cells.vcf.gz -o output.vcf.gz -w 10 -s 10 --coverage-threshold 200 --mutrate-threshold 0.2 -p 8
@@ -48,9 +47,9 @@ Arguments:
     --mutrate-threshold      Maximum mutrate per position to include (default: 0.2)
     -p, --processes          Number of parallel processes (default: number of CPUs)
 """
-__version__="v5.0"
+__version__="v5.2"
 __author__="linxy"
-__last_modify__="06-Jan-2026"
+__last_modify__="27-Feb-2026"
 
 
 def get_vcf_info(vcf_path):
@@ -67,6 +66,17 @@ def get_vcf_info(vcf_path):
         contigs: list
             List of contig names from VCF header
     """
+    # Check that tabix index exists
+    tbi_path = vcf_path + '.tbi'
+    csi_path = vcf_path + '.csi'
+    if not os.path.exists(tbi_path) and not os.path.exists(csi_path):
+        raise SystemExit(
+            f"\nError: No tabix index found for '{vcf_path}'.\n"
+            f"Expected '{tbi_path}' or '{csi_path}'.\n\n"
+            f"Please create an index using:\n"
+            f"  tabix -p vcf {vcf_path}\n"
+        )
+
     try:
         vcf = pysam.VariantFile(vcf_path)
     except NotImplementedError as e:
@@ -112,7 +122,7 @@ def process_gene(gene, vcf_path, samples, n_samples, win_len, step,
     Returns:
         gene: str
         windows: list of tuples
-            [(win_start, win_end, dp_array, ad_array, mr_array, valid_mask), ...]
+            [(win_start, win_end, dp_array, ad_array, mr_array, np_array, valid_mask), ...]
     """
     vcf = pysam.VariantFile(vcf_path)
 
@@ -227,6 +237,9 @@ def calculate_windows(positions, dp_matrix, ad_matrix, n_samples,
             # Create validity mask based on coverage threshold
             valid_mask = dp_sum >= coverage_threshold
 
+            # Count positions passing mutrate filter per cell
+            np_sum = win_mask.sum(axis=0)
+
             # Only add window if at least one sample passes
             if valid_mask.any():
                 # Calculate mutation rates
@@ -239,6 +252,7 @@ def calculate_windows(positions, dp_matrix, ad_matrix, n_samples,
                     dp_sum.astype(np.int32),
                     ad_sum.astype(np.int32),
                     mr.astype(np.float32),
+                    np_sum.astype(np.int32),
                     valid_mask
                 ))
 
@@ -252,31 +266,34 @@ def process_gene_wrapper(args):
     return process_gene(*args)
 
 
-def write_vcf_header(output_path, samples, contigs):
-    """Write VCF header to output file."""
-    with gzip.open(output_path, 'wt') as f:
-        f.write("##fileformat=VCFv4.2\n")
-        f.write("##source=cellSNP2window_v5.0_parallel\n")
-        f.write('##INFO=<ID=WIN_END,Number=1,Type=Integer,Description="Window end position">\n')
-        f.write('##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Total coverage in window">\n')
-        f.write('##FORMAT=<ID=AD,Number=1,Type=Integer,Description="Total alternate counts in window">\n')
-        f.write('##FORMAT=<ID=MR,Number=1,Type=Float,Description="Mutation rate (AD/DP)">\n')
+def write_bgzf_header(bgzf_fh, samples, contigs):
+    """Write VCF header to an open BGZFile handle."""
+    lines = []
+    lines.append("##fileformat=VCFv4.2\n")
+    lines.append("##source=cellSNP2window_v5.2_parallel\n")
+    lines.append('##INFO=<ID=WIN_END,Number=1,Type=Integer,Description="Window end position">\n')
+    lines.append('##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Total coverage in window">\n')
+    lines.append('##FORMAT=<ID=AD,Number=1,Type=Integer,Description="Total alternate counts in window">\n')
+    lines.append('##FORMAT=<ID=MR,Number=1,Type=Float,Description="Mutation rate (AD/DP)">\n')
+    lines.append('##FORMAT=<ID=NP,Number=1,Type=Integer,Description="Number of positions used in window">\n')
 
-        for contig in contigs:
-            f.write(f'##contig=<ID={contig}>\n')
+    for contig in contigs:
+        lines.append(f'##contig=<ID={contig}>\n')
 
-        header_cols = ['#CHROM', 'POS', 'ID', 'REF', 'ALT', 'QUAL', 'FILTER', 'INFO', 'FORMAT']
-        header_cols.extend(samples)
-        f.write('\t'.join(header_cols) + '\n')
+    header_cols = ['#CHROM', 'POS', 'ID', 'REF', 'ALT', 'QUAL', 'FILTER', 'INFO', 'FORMAT']
+    header_cols.extend(samples)
+    lines.append('\t'.join(header_cols) + '\n')
+
+    bgzf_fh.write(''.join(lines).encode())
 
 
-def write_vcf_results(output_path, results, n_samples):
+def write_bgzf_results(bgzf_fh, results, n_samples):
     """
-    Append results to VCF file.
+    Write results to an open BGZFile handle.
 
     Parameters:
-        output_path: str
-            Path to output file
+        bgzf_fh: pysam.BGZFile
+            Open BGZF file handle for writing
         results: list
             List of (gene, windows) tuples
         n_samples: int
@@ -284,13 +301,13 @@ def write_vcf_results(output_path, results, n_samples):
     """
     lines = []
     for gene, windows in results:
-        for win_start, win_end, dp_arr, ad_arr, mr_arr, valid_mask in windows:
+        for win_start, win_end, dp_arr, ad_arr, mr_arr, np_arr, valid_mask in windows:
             sample_cols = []
             for i in range(n_samples):
                 if valid_mask[i]:
-                    sample_cols.append(f"{dp_arr[i]}:{ad_arr[i]}:{mr_arr[i]}")
+                    sample_cols.append(f"{dp_arr[i]}:{ad_arr[i]}:{mr_arr[i]}:{np_arr[i]}")
                 else:
-                    sample_cols.append('.:.:.')
+                    sample_cols.append('.:.:.:.')
 
             row = [
                 gene,
@@ -301,13 +318,12 @@ def write_vcf_results(output_path, results, n_samples):
                 '.',
                 'PASS',
                 f'WIN_END={win_end}',
-                'DP:AD:MR'
+                'DP:AD:MR:NP'
             ] + sample_cols
 
             lines.append('\t'.join(row) + '\n')
 
-    with gzip.open(output_path, 'at') as f:
-        f.writelines(lines)
+    bgzf_fh.write(''.join(lines).encode())
 
 
 def main(args):
@@ -320,14 +336,10 @@ def main(args):
     genes = contigs  # Process all contigs
     print(f"Found {n_samples} cells and {len(genes)} genes/chromosomes")
 
-    # Determine number of processes
+    # Determine number of processes: CLI arg > cpu_count
     n_processes = args.processes if args.processes else cpu_count()
     n_processes = min(n_processes, len(genes))
     print(f"Using {n_processes} parallel processes")
-
-    # Write VCF header
-    print(f"Writing output to: {args.output_file}")
-    write_vcf_header(args.output_file, samples, contigs)
 
     # Prepare arguments for parallel processing
     process_args = [
@@ -336,36 +348,40 @@ def main(args):
         for gene in genes
     ]
 
-    # Process genes in parallel
+    # Process genes in parallel, write to a single BGZF stream
     total_windows = 0
     genes_with_windows = 0
 
-    print("Processing genes in parallel...")
-    with Pool(processes=n_processes) as pool:
-        # Use imap for ordered results and progress tracking
-        results_buffer = []
-        buffer_size = 100  # Write every N genes
+    print(f"Writing output (BGZF) to: {args.output_file}")
+    with pysam.BGZFile(args.output_file, 'wb') as bgzf_fh:
+        write_bgzf_header(bgzf_fh, samples, contigs)
 
-        for i, (gene, windows) in enumerate(pool.imap(process_gene_wrapper, process_args)):
-            if windows:
-                results_buffer.append((gene, windows))
-                total_windows += len(windows)
-                genes_with_windows += 1
+        print("Processing genes in parallel...")
+        with Pool(processes=n_processes) as pool:
+            results_buffer = []
+            buffer_size = 100  # Write every N genes
 
-            # Periodic write to reduce memory
-            if len(results_buffer) >= buffer_size:
-                write_vcf_results(args.output_file, results_buffer, n_samples)
-                results_buffer = []
+            for i, (gene, windows) in enumerate(pool.imap(process_gene_wrapper, process_args)):
+                if windows:
+                    results_buffer.append((gene, windows))
+                    total_windows += len(windows)
+                    genes_with_windows += 1
 
-            # Progress update
-            if (i + 1) % 500 == 0:
-                print(f"  Processed {i + 1}/{len(genes)} genes...")
+                # Periodic write to reduce memory
+                if len(results_buffer) >= buffer_size:
+                    write_bgzf_results(bgzf_fh, results_buffer, n_samples)
+                    results_buffer = []
 
-        # Write remaining results
-        if results_buffer:
-            write_vcf_results(args.output_file, results_buffer, n_samples)
+                # Progress update
+                if (i + 1) % 500 == 0:
+                    print(f"  Processed {i + 1}/{len(genes)} genes...")
+
+            # Write remaining results
+            if results_buffer:
+                write_bgzf_results(bgzf_fh, results_buffer, n_samples)
 
     print(f"Done! Total: {total_windows} windows across {genes_with_windows} genes")
+    print(f"To index the output: tabix -p vcf {args.output_file}")
 
 
 if __name__ == '__main__':

@@ -17,7 +17,7 @@ import sys
 
 __doc__="""
     The script is used for getting fixed windows from *.mutrate.txt.gz.
-    Usage: python mutrate2window.py -i mutrate.txt.gz -o win.gz -w 10 -s 10 --coverage-threshold 100
+    Usage: python mutrate2window.py -i mutrate.txt.gz -o mutrate_10ntc1.csv.gz -w 10 -s 10 --coverage-threshold 100
     Criteria:
     - Input: mutrate.txt.gz
     - Output: 10nt.csv.gz
@@ -70,10 +70,11 @@ def gene_rolling(df, win_len, step, coverage_threshold, mutrate_threshold=0.2):
             # Apply coverage threshold
             if coverage_sum >= coverage_threshold:
                 mutrate = round(mutant_sum / coverage_sum, 5) if coverage_sum > 0 else 0
-                
+
                 windows.append({
                     'win': win_start,
                     'win_end': win_end,
+                    'n_positions': len(window_data),
                     'coverage': coverage_sum,
                     'mutant': mutant_sum,
                     'mutrate': mutrate
@@ -86,10 +87,10 @@ def gene_rolling(df, win_len, step, coverage_threshold, mutrate_threshold=0.2):
     
     # Add window number for compatibility
     if len(result_df) > 0:
-        result_df = result_df[['win', 'coverage', 'mutant', 'mutrate', 'win_end']]
+        result_df = result_df[['win', 'n_positions', 'coverage', 'mutant', 'mutrate', 'win_end']]
     else:
         # Return empty DataFrame with correct columns
-        result_df = pd.DataFrame(columns=['win', 'coverage', 'mutant', 'mutrate', 'win_end'])
+        result_df = pd.DataFrame(columns=['win', 'n_positions', 'coverage', 'mutant', 'mutrate', 'win_end'])
     
     return result_df
 
@@ -190,7 +191,7 @@ def main(args):
         mtr_win_df.reset_index(drop=True, inplace=True)
     else:
         # Create empty DataFrame with correct columns
-        mtr_win_df = pd.DataFrame(columns=['gene', 'win', 'coverage', 'mutant', 'mutrate', 'win_end'])
+        mtr_win_df = pd.DataFrame(columns=['gene', 'win', 'n_positions', 'coverage', 'mutant', 'mutrate', 'win_end'])
     
     # write the results to the output file as a tab-separated file
     mtr_win_df.to_csv(args.output_file, sep='\t', index=False, compression='gzip')
