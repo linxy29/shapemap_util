@@ -8,10 +8,9 @@ A memory-efficient tool for analyzing BAM file read alignments with focus on:
 - Transcript assignment statistics using online computation
 - Read filtering by alignment quality
 - Extraction of uniquely mapped reads
-- Extract the first best alignment that are longer than 40bp. Alignments are reported in descending order by alignment score. An alignment score quantifies how similar the read sequence is to the reference sequence aligned to. The higher the score, the more similar they are. A score is calculated by subtracting penalties for each difference (mismatch, gap, etc.) and, in local alignment mode, adding bonuses for each match.
+- Extract the primary alignments
 
-Version: v3.1 (Memory Efficient - Stream Processing)
-- Change from extract the primary alignment to the first best alignment that are longer than 40bp.
+Version: v3.0 (Memory Efficient - Stream Processing)
 
 Key improvements over v2:
 - Stream processing: Process one read at a time, write immediately, discard
@@ -487,14 +486,11 @@ Then use the sorted file with this tool.
     def _write_unique_read_to_bam(self, read_data: ReadAlignment,
                                   bam_writer: pysam.AlignmentFile) -> None:
         """Write uniquely mapped read's primary alignment to BAM."""
-        if hasattr(read_data, '_alignments') and read_data._alignments:
-            # Try primary first
+        if hasattr(read_data, '_alignments'):
             for alignment in read_data._alignments:
+                # Only write primary alignments
                 if not alignment.is_secondary and not alignment.is_supplementary:
                     bam_writer.write(alignment)
-                    return
-            # No primary found (filtered by length), write first available
-            bam_writer.write(read_data._alignments[0])
 
     def _log_processing_summary(self) -> None:
         """Log processing summary statistics."""

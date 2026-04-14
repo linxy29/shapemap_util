@@ -160,7 +160,7 @@ def read_cellsnp_vcf_to_matrices(vcf_gz_file, chunk_size=100000, progress_interv
 
     return coverage_df, mutrate_df
 
-def read_cellsnp_vcf_to_matrices_pysam_sparse(vcf_gz_file, progress_interval=100000):
+def read_cellsnp_vcf_to_matrices_pysam_sparse(vcf_gz_file, progress_interval=100000, target_genes=None, include_mutant_counts=False):
     """
     Memory-efficient reading of cellSNP.cells.vcf.gz using sparse matrices.
 
@@ -173,12 +173,24 @@ def read_cellsnp_vcf_to_matrices_pysam_sparse(vcf_gz_file, progress_interval=100
         Path to cellSNP.cells.vcf.gz file
     progress_interval : int, default=100000
         Print progress every N variants. Set to 0 to disable progress output.
+    target_genes : list of str, optional
+        If provided, only load positions belonging to these genes.
+        Gene names must match the CHROM field in the VCF exactly.
+        When the VCF is indexed (.tbi/.csi), uses vcf.fetch() for
+        efficient random access instead of scanning the whole file.
+    include_mutant_counts : bool, default=False
+        If True, also output a sparse matrix of mutant read counts.
 
     Returns:
     --------
-    tuple: (coverage_sparse, mutrate_sparse, position_info, col_names)
+    tuple:
+        If include_mutant_counts=False (default):
+            (coverage_sparse, mutrate_sparse, position_info, col_names)
+        If include_mutant_counts=True:
+            (coverage_sparse, mutrate_sparse, mutcount_sparse, position_info, col_names)
         - coverage_sparse: scipy.sparse.csr_matrix with coverage values
         - mutrate_sparse: scipy.sparse.csr_matrix with mutation rates
+        - mutcount_sparse: scipy.sparse.csr_matrix with mutant read counts
         - position_info: pandas.DataFrame with columns ['gene', 'pos', 'ref']
         - col_names: list of cell/sample names
     """
@@ -194,48 +206,184 @@ def read_cellsnp_vcf_to_matrices_pysam_sparse(vcf_gz_file, progress_interval=100
     n_cells = len(samples)
     print(f"Found {n_cells} cells")
 
+    if target_genes is not None:
+        target_genes_set = set(target_genes)
+        print(f"Filtering for {len(target_genes_set)} target gene(s): {', '.join(sorted(target_genes_set))}")
+
     genes = []
     positions = []
     refs = []
     cov_data, cov_rows, cov_cols = [], [], []
     mut_data, mut_rows, mut_cols = [], [], []
+    if include_mutant_counts:
+        ad_data, ad_rows, ad_cols = [], [], []
 
-    for i, record in enumerate(vcf):
-        genes.append(record.chrom)
-        positions.append(record.pos)
-        refs.append(record.ref)
+    # Use vcf.fetch() per gene when target_genes is provided and index exists
+    if target_genes is not None:
+        try:
+            # Test if index is available by fetching the first target gene
+            vcf.fetch(contig=target_genes[0])
+            use_fetch = True
+        except ValueError:
+            use_fetch = False
+            print("  Warning: VCF index not available, falling back to full scan with filtering")
 
-        for cell_idx, sample_name in enumerate(samples):
-            sample = record.samples[sample_name]
-            dp_val = sample.get('DP')
-            ad_val = sample.get('AD')
-            all_vals = sample.get('ALL')
+        if use_fetch:
+            row_idx = 0
+            n_scanned = 0
+            print(f"  Using indexed fetch for {len(target_genes_set)} gene(s)...")
+            for gene_name in sorted(target_genes_set):
+                gene_start_idx = row_idx
+                try:
+                    for record in vcf.fetch(contig=gene_name):
+                        genes.append(record.chrom)
+                        positions.append(record.pos)
+                        refs.append(record.ref)
 
-            if dp_val is None or all_vals is None:
-                continue
+                        for cell_idx, sample_name in enumerate(samples):
+                            sample = record.samples[sample_name]
+                            dp_val = sample.get('DP')
+                            ad_val = sample.get('AD')
+                            all_vals = sample.get('ALL')
 
-            try:
-                if isinstance(all_vals, (list, tuple)) and len(all_vals) >= 4:
-                    cov = sum(all_vals[:4])
-                    if cov > 0:  # Only store non-zero values
-                        ref = dp_val - (ad_val if ad_val else 0)
-                        mutation = cov - ref
+                            if dp_val is None or all_vals is None:
+                                continue
 
-                        cov_data.append(cov)
-                        cov_rows.append(i)
-                        cov_cols.append(cell_idx)
+                            try:
+                                if isinstance(all_vals, (list, tuple)) and len(all_vals) >= 4:
+                                    cov = sum(all_vals[:4])
+                                    if cov > 0:
+                                        ref = dp_val - (ad_val if ad_val else 0)
+                                        mutation = cov - ref
 
-                        mut_data.append(mutation / cov)
-                        mut_rows.append(i)
-                        mut_cols.append(cell_idx)
-            except (TypeError, ValueError):
-                continue
+                                        cov_data.append(cov)
+                                        cov_rows.append(row_idx)
+                                        cov_cols.append(cell_idx)
 
-        if progress_interval and (i + 1) % progress_interval == 0:
-            print(f"  Processed {i + 1:,} variants...")
+                                        mut_data.append(mutation / cov)
+                                        mut_rows.append(row_idx)
+                                        mut_cols.append(cell_idx)
 
-    vcf.close()
-    n_variants = len(genes)
+                                        if include_mutant_counts:
+                                            ad_data.append(mutation)
+                                            ad_rows.append(row_idx)
+                                            ad_cols.append(cell_idx)
+                            except (TypeError, ValueError):
+                                continue
+
+                        row_idx += 1
+                        n_scanned += 1
+
+                        if progress_interval and n_scanned % progress_interval == 0:
+                            print(f"  Processed {n_scanned:,} variants...")
+                    gene_count = row_idx - gene_start_idx
+                    print(f"  Loaded gene '{gene_name}': {gene_count:,} variants")
+                except ValueError:
+                    print(f"  Warning: gene '{gene_name}' not found in VCF, skipping")
+
+            vcf.close()
+            n_variants = len(genes)
+            print(f"Parsed {n_variants:,} positions (from {len(target_genes_set)} target genes)")
+
+        else:
+            # Fallback: full scan with filtering
+            print("  Scanning full VCF with gene filtering...")
+            row_idx = 0
+            n_scanned = 0
+            for record in vcf:
+                n_scanned += 1
+                if record.chrom not in target_genes_set:
+                    if progress_interval and n_scanned % progress_interval == 0:
+                        print(f"  Scanned {n_scanned:,} variants ({row_idx:,} kept)...")
+                    continue
+
+                genes.append(record.chrom)
+                positions.append(record.pos)
+                refs.append(record.ref)
+
+                for cell_idx, sample_name in enumerate(samples):
+                    sample = record.samples[sample_name]
+                    dp_val = sample.get('DP')
+                    ad_val = sample.get('AD')
+                    all_vals = sample.get('ALL')
+
+                    if dp_val is None or all_vals is None:
+                        continue
+
+                    try:
+                        if isinstance(all_vals, (list, tuple)) and len(all_vals) >= 4:
+                            cov = sum(all_vals[:4])
+                            if cov > 0:
+                                ref = dp_val - (ad_val if ad_val else 0)
+                                mutation = cov - ref
+
+                                cov_data.append(cov)
+                                cov_rows.append(row_idx)
+                                cov_cols.append(cell_idx)
+
+                                mut_data.append(mutation / cov)
+                                mut_rows.append(row_idx)
+                                mut_cols.append(cell_idx)
+
+                                if include_mutant_counts:
+                                    ad_data.append(mutation)
+                                    ad_rows.append(row_idx)
+                                    ad_cols.append(cell_idx)
+                    except (TypeError, ValueError):
+                        continue
+
+                row_idx += 1
+
+                if progress_interval and n_scanned % progress_interval == 0:
+                    print(f"  Scanned {n_scanned:,} variants ({row_idx:,} kept)...")
+
+            vcf.close()
+            n_variants = len(genes)
+            print(f"Scanned {n_scanned:,} total variants, kept {n_variants:,} from target genes")
+
+    else:
+        # Original path: load all variants
+        for i, record in enumerate(vcf):
+            genes.append(record.chrom)
+            positions.append(record.pos)
+            refs.append(record.ref)
+
+            for cell_idx, sample_name in enumerate(samples):
+                sample = record.samples[sample_name]
+                dp_val = sample.get('DP')
+                ad_val = sample.get('AD')
+                all_vals = sample.get('ALL')
+
+                if dp_val is None or all_vals is None:
+                    continue
+
+                try:
+                    if isinstance(all_vals, (list, tuple)) and len(all_vals) >= 4:
+                        cov = sum(all_vals[:4])
+                        if cov > 0:
+                            ref = dp_val - (ad_val if ad_val else 0)
+                            mutation = cov - ref
+
+                            cov_data.append(cov)
+                            cov_rows.append(i)
+                            cov_cols.append(cell_idx)
+
+                            mut_data.append(mutation / cov)
+                            mut_rows.append(i)
+                            mut_cols.append(cell_idx)
+
+                            if include_mutant_counts:
+                                ad_data.append(mutation)
+                                ad_rows.append(i)
+                                ad_cols.append(cell_idx)
+                except (TypeError, ValueError):
+                    continue
+
+            if progress_interval and (i + 1) % progress_interval == 0:
+                print(f"  Processed {i + 1:,} variants...")
+
+        vcf.close()
+        n_variants = len(genes)
 
     print(f"Parsed {n_variants:,} positions")
     print(f"Non-zero entries: {len(cov_data):,}")
@@ -250,6 +398,12 @@ def read_cellsnp_vcf_to_matrices_pysam_sparse(vcf_gz_file, progress_interval=100
         (mut_data, (mut_rows, mut_cols)),
         shape=(n_variants, n_cells), dtype=np.float32
     )
+
+    if include_mutant_counts:
+        ad_sparse = sparse.csr_matrix(
+            (ad_data, (ad_rows, ad_cols)),
+            shape=(n_variants, n_cells), dtype=np.int32
+        )
 
     # Create position_info DataFrame (similar to read_window_vcf_to_sparse)
     position_info = pd.DataFrame({
@@ -268,7 +422,11 @@ def read_cellsnp_vcf_to_matrices_pysam_sparse(vcf_gz_file, progress_interval=100
     print("Done!")
     print(f"Coverage matrix shape: {cov_sparse.shape}")
     print(f"Mutation rate matrix shape: {mut_sparse.shape}")
+    if include_mutant_counts:
+        print(f"Mutant count matrix shape: {ad_sparse.shape}")
 
+    if include_mutant_counts:
+        return cov_sparse, mut_sparse, ad_sparse, position_info, samples
     return cov_sparse, mut_sparse, position_info, samples
 
 
@@ -421,7 +579,7 @@ def read_cellsnp_base_vcf(vcf_file, include_oth=False, min_coverage=100):
     return df
 
 
-def read_window_vcf_to_sparse(vcf_file, progress_interval=100000):
+def read_window_vcf_to_sparse(vcf_file, progress_interval=100000, include_mutant_counts=False):
     """
     Read window-based VCF file with per-cell DP:AD:MR format and generate sparse matrices.
 
@@ -436,12 +594,19 @@ def read_window_vcf_to_sparse(vcf_file, progress_interval=100000):
         Cell data format: "DP:AD:MR" (e.g., "103:0:0.0") or ".:.:." for missing
     progress_interval : int, default=100000
         Print progress every N variants. Set to 0 to disable progress output.
+    include_mutant_counts : bool, default=False
+        If True, also output a sparse matrix of mutant read counts (AD values).
 
     Returns:
     --------
-    tuple: (coverage_sparse, mutrate_sparse, position_info, col_names)
+    tuple:
+        If include_mutant_counts=False (default):
+            (coverage_sparse, mutrate_sparse, position_info, col_names)
+        If include_mutant_counts=True:
+            (coverage_sparse, mutrate_sparse, mutcount_sparse, position_info, col_names)
         - coverage_sparse: scipy.sparse.csr_matrix with DP (coverage) values
         - mutrate_sparse: scipy.sparse.csr_matrix with MR (mutation rate) values
+        - mutcount_sparse: scipy.sparse.csr_matrix with AD (mutant read count) values
         - position_info: pandas.DataFrame with columns ['gene', 'pos', 'ref', 'win_end']
         - col_names: list of cell/sample names
     """
@@ -465,6 +630,8 @@ def read_window_vcf_to_sparse(vcf_file, progress_interval=100000):
 
     cov_data, cov_rows, cov_cols = [], [], []
     mut_data, mut_rows, mut_cols = [], [], []
+    if include_mutant_counts:
+        ad_data, ad_rows, ad_cols = [], [], []
 
     col_names = []
     n_cells = 0
@@ -542,6 +709,12 @@ def read_window_vcf_to_sparse(vcf_file, progress_interval=100000):
                         mut_rows.append(row_idx)
                         mut_cols.append(cell_idx)
 
+                        if include_mutant_counts:
+                            ad_val = int(ad_str) if ad_str != '.' else 0
+                            ad_data.append(ad_val)
+                            ad_rows.append(row_idx)
+                            ad_cols.append(cell_idx)
+
                 except (ValueError, IndexError):
                     continue
 
@@ -569,6 +742,12 @@ def read_window_vcf_to_sparse(vcf_file, progress_interval=100000):
         shape=(n_variants, n_cells), dtype=np.float32
     )
 
+    if include_mutant_counts:
+        ad_sparse = sparse.csr_matrix(
+            (ad_data, (ad_rows, ad_cols)),
+            shape=(n_variants, n_cells), dtype=np.int32
+        )
+
     position_info = pd.DataFrame({
         'gene': genes,
         'pos': positions,
@@ -579,13 +758,17 @@ def read_window_vcf_to_sparse(vcf_file, progress_interval=100000):
 
     print(f"Coverage matrix shape: {cov_sparse.shape}")
     print(f"Mutation rate matrix shape: {mut_sparse.shape}")
+    if include_mutant_counts:
+        print(f"Mutant count matrix shape: {ad_sparse.shape}")
 
+    if include_mutant_counts:
+        return cov_sparse, mut_sparse, ad_sparse, position_info, col_names
     return cov_sparse, mut_sparse, position_info, col_names
 
-def read_paired_vcf_to_sparse(rRNA_win_path, steptwo_win_path, progress_interval=100000):
+def read_paired_vcf_to_sparse(rRNA_win_path, steptwo_win_path, progress_interval=100000, include_mutant_counts=False):
     """
     Read paired rRNA and steptwo VCF files and concatenate them.
-    
+
     Parameters:
     -----------
     rRNA_win_path : str
@@ -594,63 +777,76 @@ def read_paired_vcf_to_sparse(rRNA_win_path, steptwo_win_path, progress_interval
         Path to steptwo VCF file
     progress_interval : int, default=100000
         Print progress every N variants
-        
+    include_mutant_counts : bool, default=False
+        If True, also output a sparse matrix of mutant read counts (AD values).
+
     Returns:
     --------
-    tuple: (coverage_sparse, mutrate_sparse, position_info, col_names)
-        - coverage_sparse: scipy.sparse.csr_matrix with concatenated DP values
-        - mutrate_sparse: scipy.sparse.csr_matrix with concatenated MR values
-        - position_info: pandas.DataFrame with concatenated position info
-        - col_names: list of cell/sample names (should be identical for both)
+    tuple:
+        If include_mutant_counts=False (default):
+            (coverage_sparse, mutrate_sparse, position_info, col_names)
+        If include_mutant_counts=True:
+            (coverage_sparse, mutrate_sparse, mutcount_sparse, position_info, col_names)
     """
     from scipy import sparse
     import pandas as pd
-    
+
     print("=" * 80)
     print("Reading rRNA VCF file...")
     print("=" * 80)
-    cov_rRNA, mut_rRNA, pos_rRNA, cells_rRNA = read_window_vcf_to_sparse(
-        rRNA_win_path, progress_interval
+    rRNA_result = read_window_vcf_to_sparse(
+        rRNA_win_path, progress_interval, include_mutant_counts=include_mutant_counts
     )
-    
+
     print("\n" + "=" * 80)
     print("Reading steptwo VCF file...")
     print("=" * 80)
-    cov_steptwo, mut_steptwo, pos_steptwo, cells_steptwo = read_window_vcf_to_sparse(
-        steptwo_win_path, progress_interval
+    steptwo_result = read_window_vcf_to_sparse(
+        steptwo_win_path, progress_interval, include_mutant_counts=include_mutant_counts
     )
-    
+
+    if include_mutant_counts:
+        cov_rRNA, mut_rRNA, ad_rRNA, pos_rRNA, cells_rRNA = rRNA_result
+        cov_steptwo, mut_steptwo, ad_steptwo, pos_steptwo, cells_steptwo = steptwo_result
+    else:
+        cov_rRNA, mut_rRNA, pos_rRNA, cells_rRNA = rRNA_result
+        cov_steptwo, mut_steptwo, pos_steptwo, cells_steptwo = steptwo_result
+
     # Verify that cell names match
     if cells_rRNA != cells_steptwo:
         raise ValueError(
             f"Cell names don't match between rRNA and steptwo files!\n"
             f"rRNA cells: {len(cells_rRNA)}, steptwo cells: {len(cells_steptwo)}"
         )
-    
+
     print("\n" + "=" * 80)
     print("Concatenating matrices...")
     print("=" * 80)
-    
+
     # Concatenate sparse matrices vertically (row-wise)
     cov_combined = sparse.vstack([cov_rRNA, cov_steptwo], format='csr')
     mut_combined = sparse.vstack([mut_rRNA, mut_steptwo], format='csr')
-    
+
     # Concatenate position info
     pos_combined = pd.concat([pos_rRNA, pos_steptwo], axis=0, ignore_index=False)
-    
+
     print(f"Combined coverage matrix shape: {cov_combined.shape}")
     print(f"Combined mutation rate matrix shape: {mut_combined.shape}")
     print(f"Combined position info shape: {pos_combined.shape}")
     print(f"Total windows: {len(pos_combined):,}")
     print("=" * 80)
-    
+
+    if include_mutant_counts:
+        ad_combined = sparse.vstack([ad_rRNA, ad_steptwo], format='csr')
+        print(f"Combined mutant count matrix shape: {ad_combined.shape}")
+        return cov_combined, mut_combined, ad_combined, pos_combined, cells_rRNA
     return cov_combined, mut_combined, pos_combined, cells_rRNA
 
 
-def read_multiple_paired_vcf_to_dict(sample_paths_dict, progress_interval=100000):
+def read_multiple_paired_vcf_to_dict(sample_paths_dict, progress_interval=100000, include_mutant_counts=False):
     """
     Read multiple samples with paired rRNA and steptwo VCF files.
-    
+
     Parameters:
     -----------
     sample_paths_dict : dict
@@ -661,24 +857,29 @@ def read_multiple_paired_vcf_to_dict(sample_paths_dict, progress_interval=100000
         }
     progress_interval : int, default=100000
         Print progress every N variants
-        
+    include_mutant_counts : bool, default=False
+        If True, also output a sparse matrix of mutant read counts (AD values).
+
     Returns:
     --------
-    dict: Dictionary with sample names as keys and tuples of 
-          (coverage_sparse, mutrate_sparse, position_info, col_names) as values
+    dict: Dictionary with sample names as keys and tuples of
+          (coverage_sparse, mutrate_sparse, position_info, col_names) as values,
+          or (coverage_sparse, mutrate_sparse, mutcount_sparse, position_info, col_names)
+          if include_mutant_counts=True.
     """
     results = {}
-    
+
     for sample_name, (rRNA_path, steptwo_path) in sample_paths_dict.items():
         print("\n" + "=" * 80)
         print(f"PROCESSING SAMPLE: {sample_name}")
         print("=" * 80)
-        
+
         try:
-            cov, mut, pos, cells = read_paired_vcf_to_sparse(
-                rRNA_path, steptwo_path, progress_interval
+            result = read_paired_vcf_to_sparse(
+                rRNA_path, steptwo_path, progress_interval,
+                include_mutant_counts=include_mutant_counts
             )
-            results[sample_name] = (cov, mut, pos, cells)
+            results[sample_name] = result
             
             print(f"\n✓ Successfully processed {sample_name}")
             print(f"  - Windows: {pos.shape[0]:,}")

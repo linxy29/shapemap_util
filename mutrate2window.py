@@ -1,10 +1,13 @@
 #!/home/users/astar/gis/gaog/.conda/envs/main/bin/python
 
 ## This script is getting from Gao Ge. 
-## Version: v2.0 
+## Version: v3.0
 ## Change the input file from gz to txt, and it contains header.
 ## Order dataframe by gene and pos before processing.
 ## Add test() function to test the script.
+## Key update in v3.0: For each gene, the first window start is aligned to the nearest
+##   position ending in digit 1 (e.g., 1, 11, 21, 31...), rounded down from the first
+##   observed position.
 
 ## Important: Might need to add the step for filtering based on mutation rates. In this case, need to consider how to make sure the position is the same between control and signal files.
 
@@ -22,9 +25,9 @@ __doc__="""
     - Input: mutrate.txt.gz
     - Output: 10nt.csv.gz
     """
-__version__="v2.0"
+__version__="v3.0"
 __author__="linxy"
-__last_modify__="Dec-2025"
+__last_modify__="13-Apr-2026"
 
 def gene_rolling(df, win_len, step, coverage_threshold, mutrate_threshold=0.2):
     '''
@@ -55,7 +58,7 @@ def gene_rolling(df, win_len, step, coverage_threshold, mutrate_threshold=0.2):
     
     # Create windows based on actual genomic positions
     windows = []
-    win_start = min_pos
+    win_start = min_pos - ((min_pos - 1) % 10)
     
     while win_start <= max_pos:
         win_end = win_start + win_len - 1

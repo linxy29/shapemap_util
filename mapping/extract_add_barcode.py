@@ -92,9 +92,6 @@ def add_barcode_umi_tags(input_bam, output_bam, barcode_tag='CB', umi_tag='UM'):
     print(f"Unique barcodes found: {len(stats['unique_barcodes']):,}")
     print(f"Unique UMIs found: {len(stats['unique_umis']):,}")
     
-    # Index the output BAM file
-    print(f"\nIndexing output BAM file...")
-    pysam.index(output_bam)
     print(f"Done! Output written to {output_bam}")
 
 def extract_barcode_umi_list(input_bam, output_file):

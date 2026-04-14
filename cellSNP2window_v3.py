@@ -1,10 +1,12 @@
 #!/home/users/astar/gis/gaog/.conda/envs/main/bin/python
 
 ## This script is getting from Gao Ge.
-## Version: v5.0
+## Version: v3.0
 ## Parallel processing using tabix random access.
 ## Each worker fetches and processes genes independently.
-## Key optimizations in this version: parallel I/O, vectorized cell calculations, no repeated scans.
+## Key update in v3.0: For each gene, the first window start is aligned to the nearest
+##   position ending in digit 1 (e.g., 1, 11, 21, 31...), rounded down from the first
+##   observed position.
 
 import argparse
 import os
@@ -47,9 +49,9 @@ Arguments:
     --mutrate-threshold      Maximum mutrate per position to include (default: 0.2)
     -p, --processes          Number of parallel processes (default: number of CPUs)
 """
-__version__="v5.2"
+__version__="v6.0"
 __author__="linxy"
-__last_modify__="27-Feb-2026"
+__last_modify__="13-Apr-2026"
 
 
 def get_vcf_info(vcf_path):
@@ -211,7 +213,7 @@ def calculate_windows(positions, dp_matrix, ad_matrix, n_samples,
     max_pos = int(positions[-1])
 
     windows = []
-    win_start = min_pos
+    win_start = min_pos - ((min_pos - 1) % 10)
 
     while win_start <= max_pos:
         win_end = win_start + win_len - 1
@@ -270,7 +272,7 @@ def write_bgzf_header(bgzf_fh, samples, contigs):
     """Write VCF header to an open BGZFile handle."""
     lines = []
     lines.append("##fileformat=VCFv4.2\n")
-    lines.append("##source=cellSNP2window_v5.2_parallel\n")
+    lines.append("##source=cellSNP2window_v6.0_parallel\n")
     lines.append('##INFO=<ID=WIN_END,Number=1,Type=Integer,Description="Window end position">\n')
     lines.append('##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Total coverage in window">\n')
     lines.append('##FORMAT=<ID=AD,Number=1,Type=Integer,Description="Total alternate counts in window">\n')

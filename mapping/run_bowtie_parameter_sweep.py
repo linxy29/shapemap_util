@@ -34,7 +34,8 @@ def modify_bowtie_pipeline(reference_index, input_fastq, output_prefix, threads=
     
     # Step 2: Sort BAM
     print("Step 2: Sorting BAM...")
-    subprocess.run(['samtools', 'sort', '-@', str(threads), '-o', bam_file, temp_bam], check=True)
+    sort_threads = min(threads, 2)
+    subprocess.run(['samtools', 'sort', '-@', str(sort_threads), '-m', '4G', '-o', bam_file, temp_bam], check=True)
     
     # Step 3: Generate stats
     print("Step 3: Generating statistics...")
@@ -111,7 +112,7 @@ def run_full_pipeline_with_params(reference_index, input_fastq, base_output_dir,
         
     except Exception as e:
         print(f"ERROR: Pipeline failed for {param_name}: {str(e)}")
-        return False
+        raise
 
 def main():
     """Main function to run parameter sweep."""
@@ -164,14 +165,14 @@ def main():
             successful_runs += 1
             continue
         
-        success = run_full_pipeline_with_params(
-            reference_index, input_fastq, base_output_dir,
-            bowtie_params, threads
-        )
-        
-        if success:
+        try:
+            run_full_pipeline_with_params(
+                reference_index, input_fastq, base_output_dir,
+                bowtie_params, threads
+            )
             successful_runs += 1
-        else:
+        except Exception as e:
+            print(f"Skipping combination {i} due to error: {e}")
             failed_runs += 1
     
     # Summary
