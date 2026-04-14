@@ -19,6 +19,7 @@ from .filter import (
 )
 from .analysis import (
     calculate_reactivity as _calculate_reactivity,
+    calculate_reactivity_from_control as _calculate_reactivity_from_control,
     calculate_cell_correlation as _calculate_cell_correlation,
     calculate_auroc as _calculate_auroc,
     get_cell_stats as _get_cell_stats,
@@ -34,7 +35,13 @@ from .metadata import (
 )
 from .plot import (
     plot_violin as _plot_violin,
-    plot_violin_multi as _plot_violin_multi
+    plot_violin_multi as _plot_violin_multi,
+    plot_reactivity as _plot_reactivity
+)
+from .metabin import (
+    create_metabins as _create_metabins,
+    create_metabins_from_dict as _create_metabins_from_dict,
+    create_metabins_from_mapping as _create_metabins_from_mapping
 )
 from .io import (
     from_vcf_pair as _from_vcf_pair,
@@ -90,7 +97,8 @@ class ShapeData:
         genepos: Union[pd.DataFrame, List, pd.Series, pd.Index],
         cells: Union[pd.DataFrame, List, np.ndarray],
         reactivity_sparse: Optional[sparse.csr_matrix] = None,
-        normalized_reactivity: Optional[np.ndarray] = None
+        normalized_reactivity: Optional[np.ndarray] = None,
+        mutcount_sparse: Optional[sparse.csr_matrix] = None
     ):
         """
         Initialize ShapeData.
@@ -111,10 +119,13 @@ class ShapeData:
             Reactivity matrix (positions x cells), can be None (default: None)
         normalized_reactivity : np.ndarray or None, optional
             Normalized reactivity matrix (positions x cells), can be None (default: None)
+        mutcount_sparse : scipy.sparse.csr_matrix or None, optional
+            Mutant read count matrix (positions x cells), can be None (default: None)
         """
         # Ensure sparse matrices are CSR format (handle sparse, dense arrays, and None)
         self.coverage = self._to_csr(coverage_sparse)
         self.mutrate = self._to_csr(mutrate_sparse)
+        self.mutcount = self._to_csr(mutcount_sparse)
         # Keep reactivity as dense array (not sparse) since it contains NaN values
         # that don't benefit from sparse storage and analysis functions expect dense
         self.reactivity = self._keep_dense(reactivity_sparse)
@@ -126,19 +137,31 @@ class ShapeData:
         else:
             self.genepos = genepos
 
-        # Store cells
+        # Store cells (normalize numeric-like IDs to int strings)
         if isinstance(cells, pd.DataFrame):
             self.cells = cells.copy()
             # Ensure the index is named
             if self.cells.index.name is None and 'cell' in self.cells.columns:
                 self.cells = self.cells.set_index('cell')
+            self.cells.index = pd.Index(
+                [self._normalize_cell_id(x) for x in self.cells.index],
+                name=self.cells.index.name
+            )
         elif isinstance(cells, list):
-            self.cells = cells.copy() if isinstance(cells, list) else list(cells)
+            self.cells = [self._normalize_cell_id(x) for x in cells]
         else:
-            self.cells = list(cells)
+            self.cells = [self._normalize_cell_id(x) for x in cells]
 
         # Validate dimensions
         self._validate()
+
+    @staticmethod
+    def _normalize_cell_id(x):
+        """Normalize cell ID: convert numeric-like values to int string, keep others as-is."""
+        try:
+            return str(int(float(x)))
+        except (ValueError, TypeError):
+            return str(x)
 
     @staticmethod
     def _to_csr(matrix):
@@ -183,6 +206,11 @@ class ShapeData:
         if self.normalized_reactivity is not None and self.normalized_reactivity.shape != self.coverage.shape:
             raise ValueError(
                 f"Coverage shape {self.coverage.shape} != normalized_reactivity shape {self.normalized_reactivity.shape}"
+            )
+
+        if self.mutcount is not None and self.mutcount.shape != self.coverage.shape:
+            raise ValueError(
+                f"Coverage shape {self.coverage.shape} != mutcount shape {self.mutcount.shape}"
             )
 
         # Check genepos length
@@ -235,11 +263,12 @@ class ShapeData:
         has_mutrate = self.mutrate is not None
         has_reactivity = self.reactivity is not None
         has_normalized = self.normalized_reactivity is not None
+        has_mutcount = self.mutcount is not None
         return (
             f"ShapeData(\n"
             f"  shape=({self.n_positions:,} positions x {self.n_cells:,} cells),\n"
             f"  non-zeros={nnz:,}, sparsity={sparsity:.2f}%,\n"
-            f"  mutrate={has_mutrate}, reactivity={has_reactivity}, normalized_reactivity={has_normalized},\n"
+            f"  mutrate={has_mutrate}, reactivity={has_reactivity}, normalized_reactivity={has_normalized}, mutcount={has_mutcount},\n"
             f"  genepos={genepos_type}, cells={cells_type}\n"
             f")"
         )
@@ -250,13 +279,15 @@ class ShapeData:
         cells_copy = self.cells.copy() if self.cells_is_df else list(self.cells)
         reactivity_copy = self.reactivity.copy() if self.reactivity is not None else None
         normalized_copy = self.normalized_reactivity.copy() if self.normalized_reactivity is not None else None
+        mutcount_copy = self.mutcount.copy() if self.mutcount is not None else None
         return ShapeData(
             self.coverage.copy(),
             self.mutrate.copy() if self.mutrate is not None else None,
             genepos_copy,
             cells_copy,
             reactivity_copy,
-            normalized_copy
+            normalized_copy,
+            mutcount_copy
         )
 
     def to_cells_df(self) -> 'ShapeData':
@@ -276,7 +307,8 @@ class ShapeData:
             self.genepos.copy() if isinstance(self.genepos, pd.DataFrame) else list(self.genepos),
             cells_df,
             self.reactivity.copy() if self.reactivity is not None else None,
-            self.normalized_reactivity.copy() if self.normalized_reactivity is not None else None
+            self.normalized_reactivity.copy() if self.normalized_reactivity is not None else None,
+            self.mutcount.copy() if self.mutcount is not None else None
         )
 
     def to_genepos_df(self) -> 'ShapeData':
@@ -325,7 +357,8 @@ class ShapeData:
             genepos_df,
             self.cells.copy() if self.cells_is_df else list(self.cells),
             self.reactivity.copy() if self.reactivity is not None else None,
-            self.normalized_reactivity.copy() if self.normalized_reactivity is not None else None
+            self.normalized_reactivity.copy() if self.normalized_reactivity is not None else None,
+            self.mutcount.copy() if self.mutcount is not None else None
         )
 
     # =========================================================================
@@ -351,7 +384,7 @@ class ShapeData:
     def join_cell_metadata(
         self,
         metadata_df: pd.DataFrame,
-        columns: Union[str, List[str]],
+        columns: Union[str, List[str], None] = None,
         on: str = 'cell',
         how: str = 'left',
         inplace: bool = True
@@ -363,8 +396,9 @@ class ShapeData:
         -----------
         metadata_df : pd.DataFrame
             DataFrame with metadata to join
-        columns : str or list of str
-            Column(s) to join from metadata_df
+        columns : str, list of str, or None
+            Column(s) to join from metadata_df. If None, join all columns
+            except the `on` column.
         on : str
             Column in metadata_df that contains cell identifiers (default: 'cell')
         how : str
@@ -381,7 +415,7 @@ class ShapeData:
     def join_genepos_metadata(
         self,
         metadata_df: pd.DataFrame,
-        columns: Union[str, List[str]],
+        columns: Union[str, List[str], None] = None,
         on: Union[str, List[str]] = None,
         how: str = 'left',
         inplace: bool = True
@@ -393,8 +427,9 @@ class ShapeData:
         -----------
         metadata_df : pd.DataFrame
             DataFrame with metadata to join
-        columns : str or list of str
-            Column(s) to join from metadata_df
+        columns : str, list of str, or None
+            Column(s) to join from metadata_df. If None, join all columns
+            except the `on` column(s).
         on : str or list of str, optional
             Column(s) to join on (must exist in both genepos and metadata_df).
             Default: ['gene', 'pos']
@@ -653,6 +688,46 @@ class ShapeData:
             drop_mutrate, filter_all_na, verbose
         )
 
+    def calculate_reactivity_from_control(
+        self,
+        control_data: 'ShapeData',
+        ref_column: str = 'ref_metabin',
+        store_as: str = 'reactivity',
+        normalize: bool = True,
+        normalize_method: str = 'box',
+        store_normalized_as: str = 'normalized_reactivity',
+        verbose: bool = True
+    ) -> None:
+        """
+        Calculate reactivity by subtracting matched control mutrate per cell.
+
+        For each cell in self, finds the corresponding control cell via
+        ref_column in control_data.cells, then computes:
+
+            reactivity = self.mutrate - control_data.mutrate[matched_cell]
+
+        Parameters
+        ----------
+        control_data : ShapeData
+            Control ShapeData (e.g., DMSO) with ref_column in cells DataFrame.
+        ref_column : str
+            Column in control_data.cells mapping control cells to treatment cells.
+        store_as : str
+            Attribute name to store reactivity matrix (default: 'reactivity').
+        normalize : bool
+            If True, compute normalized reactivity per cell per gene.
+        normalize_method : str
+            Normalization method: 'box', 'zscore', or 'minmax'.
+        store_normalized_as : str
+            Attribute name for normalized reactivity.
+        verbose : bool
+            Whether to print progress information.
+        """
+        return _calculate_reactivity_from_control(
+            self, control_data, ref_column, store_as,
+            normalize, normalize_method, store_normalized_as, verbose
+        )
+
     def calculate_cell_correlation(
         self,
         gene: str,
@@ -789,7 +864,7 @@ class ShapeData:
         gene: Optional[Union[str, List[str]]] = None,
         use_normalized: bool = False,
         cluster_column: Optional[str] = None,
-        cluster_value: Optional[str] = None,
+        cluster_value: Optional[Union[str, List[str]]] = None,
         min_cells: int = 10,
         correct_multiple: bool = True,
         correction_method: str = 'fdr_bh',
@@ -812,8 +887,8 @@ class ShapeData:
             If True, use normalized_reactivity instead of raw reactivity (default: False)
         cluster_column : str, optional
             Column for cluster filtering
-        cluster_value : str, optional
-            Specific cluster value to analyze
+        cluster_value : str, list of str, or None
+            Specific cluster value(s) to analyze
         min_cells : int
             Minimum cells required per position (default: 10)
         correct_multiple : bool
@@ -1051,6 +1126,180 @@ class ShapeData:
             jitter, show_means, **kwargs
         )
 
+    def plot_reactivity(
+        self,
+        pos_range: Optional[Tuple[int, int]] = None,
+        gene: Optional[str] = None,
+        cluster_col: str = 'leiden',
+        clusters: Optional[List] = None,
+        title: Optional[str] = None,
+        figsize: Optional[Tuple[int, int]] = None,
+        palette: Optional[str] = 'Set2',
+        line_alpha: float = 0.8,
+        fill_alpha: float = 0.2,
+        variance_style: str = 'fill',
+        spread: str = 'se',
+        use_normalized: bool = True,
+        ax: Optional[Any] = None,
+        smoothing: int = 1,
+    ) -> Any:
+        """
+        Plot coverage and reactivity profiles across positions, grouped by cluster.
+
+        Creates two vertically stacked subplots sharing the same x-axis:
+        - Top: mean coverage per position per cluster (with variance)
+        - Bottom: mean reactivity per position per cluster (with variance)
+
+        Parameters:
+        -----------
+        pos_range : tuple of (int, int), optional
+            (start, end) position values (inclusive). If None, all positions.
+        gene : str, optional
+            Gene name to filter positions (requires genepos DataFrame with 'gene' column).
+        cluster_col : str
+            Column in cells metadata for cluster labels (default: 'leiden').
+        clusters : list, optional
+            Specific cluster values to plot. If None, plots all.
+        title : str, optional
+            Overall figure title.
+        figsize : tuple, optional
+            Figure size (width, height). Default: (12, 6).
+        palette : str, optional
+            Color palette name (default: 'Set2').
+        line_alpha : float
+            Transparency of mean lines (default: 0.8).
+        fill_alpha : float
+            Transparency of variance shading (default: 0.2).
+        variance_style : str
+            'fill' for shaded region, 'errorbar' for error bars (default: 'fill').
+        use_normalized : bool
+            If True, use normalized_reactivity; otherwise use raw reactivity (default: True).
+        ax : array of Axes, optional
+            Existing axes array of length 2. If None, creates new figure.
+        smoothing : int
+            Window size for sliding-window smoothing along positions (default: 1,
+            no smoothing). Edge positions use reflect mode.
+
+        Returns:
+        --------
+        numpy.ndarray of matplotlib.axes.Axes
+        """
+        return _plot_reactivity(
+            self, pos_range, gene, cluster_col, clusters, title, figsize,
+            palette, line_alpha, fill_alpha, variance_style, spread, use_normalized, ax,
+            smoothing
+        )
+
+    # =========================================================================
+    # Metabin methods (delegating to metabin module)
+    # =========================================================================
+
+    def create_metabins(
+        self,
+        n_bins: int,
+        cluster_col: str = 'leiden',
+        x_col: str = 'x',
+        y_col: str = 'y',
+        cell_id_col: str = 'bin100_cellID',
+        verbose: bool = True
+    ) -> 'ShapeData':
+        """
+        Group spatial bins from the same cluster into metabins using recursive balanced bisection.
+
+        Parameters:
+        -----------
+        n_bins : int
+            Target number of bins per metabin.
+        cluster_col : str
+            Column name in cells metadata for cluster labels (default: 'leiden').
+        x_col : str
+            Column name for x coordinates (default: 'x').
+        y_col : str
+            Column name for y coordinates (default: 'y').
+        cell_id_col : str
+            Column name for bin100 cell IDs (default: 'bin100_cellID').
+        verbose : bool
+            Print progress information (default: True).
+
+        Returns:
+        --------
+        ShapeData
+            New ShapeData with metabins as cells.
+        """
+        return _create_metabins(self, n_bins, cluster_col, x_col, y_col,
+                                cell_id_col, verbose)
+
+    def create_metabins_from_mapping(
+        self,
+        ref_metabin_data: 'ShapeData',
+        mapping_df: 'pd.DataFrame',
+        ref_bin_col: str = 'f2a3_bin',
+        target_bin_col: str = 'mapped_dmso_bin',
+        cell_id_col: str = 'bin100_cellID',
+        ref_metabin_col: str = 'ref_metabin',
+        verbose: bool = True
+    ) -> 'ShapeData':
+        """
+        Create metabins for this (target) sample using groupings from a reference metabin.
+
+        Parameters:
+        -----------
+        ref_metabin_data : ShapeData
+            Reference metabin ShapeData (output of create_metabins).
+        mapping_df : pd.DataFrame
+            DataFrame mapping reference bin IDs to target bin IDs.
+        ref_bin_col : str
+            Column in mapping_df for reference bin IDs (default: 'f2a3_bin').
+        target_bin_col : str
+            Column in mapping_df for target bin IDs (default: 'mapped_dmso_bin').
+        cell_id_col : str
+            Column name for bin IDs in this ShapeData's cells (default: 'bin100_cellID').
+        ref_metabin_col : str
+            Column name in output cells DataFrame for the reference metabin ID
+            (default: 'ref_metabin').
+        verbose : bool
+            Print progress information (default: True).
+
+        Returns:
+        --------
+        ShapeData
+            New ShapeData with metabins matching the reference grouping.
+        """
+        return _create_metabins_from_mapping(
+            self, ref_metabin_data, mapping_df,
+            ref_bin_col, target_bin_col, cell_id_col, ref_metabin_col, verbose
+        )
+
+    def create_metabins_from_dict(
+        self,
+        metabin_dict: dict,
+        cell_id_col: str = 'bin100_cellID',
+        extra_meta: dict = None,
+        verbose: bool = True
+    ) -> 'ShapeData':
+        """
+        Create metabins by aggregating bins according to a dictionary of groupings.
+
+        Parameters:
+        -----------
+        metabin_dict : dict
+            Dictionary mapping metabin name (str) to list of bin IDs.
+        cell_id_col : str
+            Column name for bin IDs in this ShapeData's cells (default: 'bin100_cellID').
+        extra_meta : dict, optional
+            Dictionary mapping metabin name to dict of extra metadata columns.
+        verbose : bool
+            Print progress information (default: True).
+
+        Returns:
+        --------
+        ShapeData
+            New ShapeData with metabins as cells.
+        """
+        return _create_metabins_from_dict(
+            self, metabin_dict, cell_id_col, extra_meta, verbose
+        )
+
     # =========================================================================
     # Class methods (delegating to io module)
     # =========================================================================
@@ -1060,7 +1309,8 @@ class ShapeData:
         cls,
         rRNA_path: str,
         steptwo_path: str,
-        progress_interval: int = 100000
+        progress_interval: int = 100000,
+        include_mutant_counts: bool = False
     ) -> 'ShapeData':
         """
         Create ShapeData from paired rRNA and steptwo VCF files.
@@ -1073,18 +1323,22 @@ class ShapeData:
             Path to steptwo VCF file
         progress_interval : int
             Print progress every N variants
+        include_mutant_counts : bool
+            If True, also store mutant read count matrix (default: False)
 
         Returns:
         --------
         ShapeData
         """
-        return _from_vcf_pair(rRNA_path, steptwo_path, progress_interval)
+        return _from_vcf_pair(rRNA_path, steptwo_path, progress_interval, include_mutant_counts)
 
     @classmethod
     def from_cellsnp_vcf(
         cls,
         vcf_path: str,
-        progress_interval: int = 100000
+        progress_interval: int = 100000,
+        target_genes: list = None,
+        include_mutant_counts: bool = False
     ) -> 'ShapeData':
         """
         Create ShapeData from cellSNP VCF file.
@@ -1095,12 +1349,17 @@ class ShapeData:
             Path to cellSNP.cells.vcf.bgz.gz file
         progress_interval : int
             Print progress every N variants
+        target_genes : list of str, optional
+            If provided, only load positions belonging to these genes.
+            Uses indexed random access (vcf.fetch) when available.
+        include_mutant_counts : bool
+            If True, also store mutant read count matrix (default: False)
 
         Returns:
         --------
         ShapeData
         """
-        return _from_cellsnp_vcf(vcf_path, progress_interval)
+        return _from_cellsnp_vcf(vcf_path, progress_interval, target_genes=target_genes, include_mutant_counts=include_mutant_counts)
 
     # =========================================================================
     # Save/Load methods
@@ -1115,6 +1374,7 @@ class ShapeData:
         - mutrate.npz: Sparse mutation rate matrix (if exists)
         - reactivity.npy: Dense reactivity matrix (if exists)
         - normalized_reactivity.npy: Dense normalized reactivity matrix (if exists)
+        - mutcount.npz: Sparse mutant read count matrix (if exists)
         - genepos.parquet or genepos.pkl: Position metadata
         - cells.parquet or cells.pkl: Cell metadata
 
@@ -1155,6 +1415,10 @@ class ShapeData:
                                    normalized_reactivity=self.normalized_reactivity)
             else:
                 np.save(os.path.join(path, 'normalized_reactivity.npy'), self.normalized_reactivity)
+
+        # Save mutcount (sparse matrix)
+        if self.mutcount is not None:
+            sparse.save_npz(os.path.join(path, 'mutcount.npz'), self.mutcount, compressed=compress)
 
         # Save genepos
         if isinstance(self.genepos, pd.DataFrame):
@@ -1215,6 +1479,12 @@ class ShapeData:
         elif os.path.exists(norm_react_npy):
             normalized_reactivity = np.load(norm_react_npy)
 
+        # Load mutcount (optional)
+        mutcount = None
+        mutcount_path = os.path.join(path, 'mutcount.npz')
+        if os.path.exists(mutcount_path):
+            mutcount = sparse.load_npz(mutcount_path)
+
         # Load genepos
         genepos_parquet = os.path.join(path, 'genepos.parquet')
         genepos_pkl = os.path.join(path, 'genepos.pkl')
@@ -1237,7 +1507,7 @@ class ShapeData:
 
         print(f"Loaded ShapeData from {path}")
 
-        return cls(coverage, mutrate, genepos, cells, reactivity, normalized_reactivity)
+        return cls(coverage, mutrate, genepos, cells, reactivity, normalized_reactivity, mutcount)
 
     def to_pickle(self, path: str) -> None:
         """
@@ -1263,6 +1533,7 @@ class ShapeData:
                 'cells': self.cells,
                 'reactivity': self.reactivity,
                 'normalized_reactivity': self.normalized_reactivity,
+                'mutcount': self.mutcount,
             }, f, protocol=pickle.HIGHEST_PROTOCOL)
 
         print(f"Saved ShapeData to {path}")
@@ -1298,5 +1569,6 @@ class ShapeData:
             d['genepos'],
             d['cells'],
             d.get('reactivity'),
-            d.get('normalized_reactivity')
+            d.get('normalized_reactivity'),
+            d.get('mutcount')
         )

@@ -23,10 +23,11 @@ Submodules
 ----------
 - core: Main ShapeData class
 - filter: Filtering functions (filter_thresholds, filter_cells, filter_genepos, subset_by_cells, subset_by_genepos)
-- analysis: Analysis functions (calculate_reactivity, calculate_cell_correlation, get_cell_stats, get_position_stats, differential_reactivity_lm, differential_reactivity_wilcoxon)
+- analysis: Analysis functions (calculate_reactivity, calculate_reactivity_from_control, calculate_cell_correlation, get_cell_stats, get_position_stats, differential_reactivity_lm, differential_reactivity_wilcoxon)
 - metadata: Metadata functions (add_genepos_counts, join_cell_metadata, join_genepos_metadata, add_control_data)
-- plot: Plotting functions (plot_violin, plot_violin_multi)
+- plot: Plotting functions (plot_violin, plot_violin_multi, plot_reactivity)
 - io: I/O functions (from_vcf_pair, from_cellsnp_vcf)
+- metabin: Metabin functions (create_metabins)
 """
 
 from .core import ShapeData
@@ -34,12 +35,14 @@ from .core import ShapeData
 # Import commonly used functions for convenience
 from .filter import filter_thresholds, filter_cells, filter_genepos, subset_by_cells, subset_by_genepos
 from .analysis import (
-    calculate_reactivity, calculate_cell_correlation, get_cell_stats, get_position_stats,
+    calculate_reactivity, calculate_reactivity_from_control,
+    calculate_cell_correlation, get_cell_stats, get_position_stats,
     differential_reactivity_lm, differential_reactivity_wilcoxon
 )
 from .metadata import add_genepos_counts, join_cell_metadata, join_genepos_metadata, add_control_data
-from .plot import plot_violin, plot_violin_multi
-from .io import from_vcf_pair, from_cellsnp_vcf
+from .plot import plot_violin, plot_violin_multi, plot_reactivity
+from .io import combine, from_vcf_pair, from_cellsnp_vcf
+from .metabin import create_metabins, create_metabins_from_dict, create_metabins_from_mapping
 
 __all__ = [
     # Main class
@@ -52,6 +55,7 @@ __all__ = [
     'subset_by_genepos',
     # Analysis functions
     'calculate_reactivity',
+    'calculate_reactivity_from_control',
     'calculate_cell_correlation',
     'get_cell_stats',
     'get_position_stats',
@@ -65,7 +69,13 @@ __all__ = [
     # Plot functions
     'plot_violin',
     'plot_violin_multi',
+    'plot_reactivity',
     # I/O functions
+    'combine',
     'from_vcf_pair',
     'from_cellsnp_vcf',
+    # Metabin functions
+    'create_metabins',
+    'create_metabins_from_dict',
+    'create_metabins_from_mapping',
 ]

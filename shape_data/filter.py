@@ -161,7 +161,17 @@ def filter_thresholds(
             for j, (old_cell, new_cell) in enumerate(cell_mapping.items()):
                 new_normalized_reactivity[new_pos, new_cell] = data.normalized_reactivity[old_pos, old_cell]
 
-    return ShapeData(new_coverage, new_mutrate, new_genepos, new_cells, new_reactivity, new_normalized_reactivity)
+    # Handle mutcount if it exists (sparse matrix, same sparsity filtering as coverage)
+    new_mutcount = None
+    if hasattr(data, 'mutcount') and data.mutcount is not None:
+        mc_coo = data.mutcount.tocoo()
+        filtered_mc_data = mc_coo.data[mask]
+        new_mutcount = sparse.csr_matrix(
+            (filtered_mc_data, (new_rows, new_cols)),
+            shape=new_shape, dtype=mc_coo.dtype
+        )
+
+    return ShapeData(new_coverage, new_mutrate, new_genepos, new_cells, new_reactivity, new_normalized_reactivity, new_mutcount)
 
 
 def filter_cells(
@@ -305,6 +315,7 @@ def filter_cells(
         new_mutrate = data.mutrate[:, valid_cell_indices] if data.mutrate is not None else None
         new_reactivity = data.reactivity[:, valid_cell_indices] if data.reactivity is not None else None
         new_normalized_reactivity = data.normalized_reactivity[:, valid_cell_indices] if hasattr(data, 'normalized_reactivity') and data.normalized_reactivity is not None else None
+        new_mutcount = data.mutcount[:, valid_cell_indices] if hasattr(data, 'mutcount') and data.mutcount is not None else None
 
         if data.cells_is_df:
             new_cells = data.cells.iloc[valid_cell_indices].copy()
@@ -315,6 +326,7 @@ def filter_cells(
         new_mutrate = data.mutrate.copy() if data.mutrate is not None else None
         new_reactivity = data.reactivity.copy() if data.reactivity is not None else None
         new_normalized_reactivity = data.normalized_reactivity.copy() if hasattr(data, 'normalized_reactivity') and data.normalized_reactivity is not None else None
+        new_mutcount = data.mutcount.copy() if hasattr(data, 'mutcount') and data.mutcount is not None else None
         new_cells = data.cells.copy() if data.cells_is_df else list(data.cells)
 
     # Keep all positions
@@ -337,7 +349,7 @@ def filter_cells(
     print(f"All-NA windows: {n_all_na_windows} / {new_coverage.shape[0]}")
     print(f"Filtered shape: {new_coverage.shape}")
 
-    return ShapeData(new_coverage, new_mutrate, new_genepos, new_cells, new_reactivity, new_normalized_reactivity)
+    return ShapeData(new_coverage, new_mutrate, new_genepos, new_cells, new_reactivity, new_normalized_reactivity, new_mutcount)
 
 
 def subset_by_cells(data: 'ShapeData', cell_list: List[str]) -> 'ShapeData':
@@ -487,6 +499,7 @@ def filter_genepos(
         new_mutrate = data.mutrate[valid_pos_indices, :] if data.mutrate is not None else None
         new_reactivity = data.reactivity[valid_pos_indices, :] if data.reactivity is not None else None
         new_normalized_reactivity = data.normalized_reactivity[valid_pos_indices, :] if hasattr(data, 'normalized_reactivity') and data.normalized_reactivity is not None else None
+        new_mutcount = data.mutcount[valid_pos_indices, :] if hasattr(data, 'mutcount') and data.mutcount is not None else None
 
         if genepos_is_df:
             new_genepos = data.genepos.iloc[valid_pos_indices].reset_index(drop=True)
@@ -497,6 +510,7 @@ def filter_genepos(
         new_mutrate = data.mutrate.copy() if data.mutrate is not None else None
         new_reactivity = data.reactivity.copy() if data.reactivity is not None else None
         new_normalized_reactivity = data.normalized_reactivity.copy() if hasattr(data, 'normalized_reactivity') and data.normalized_reactivity is not None else None
+        new_mutcount = data.mutcount.copy() if hasattr(data, 'mutcount') and data.mutcount is not None else None
         new_genepos = data.genepos.copy() if genepos_is_df else list(data.genepos)
 
     # Keep all cells
@@ -516,7 +530,7 @@ def filter_genepos(
     print(f"All-NA cells: {n_all_na_cells} / {new_coverage.shape[1]}")
     print(f"Filtered shape: {new_coverage.shape}")
 
-    return ShapeData(new_coverage, new_mutrate, new_genepos, new_cells, new_reactivity, new_normalized_reactivity)
+    return ShapeData(new_coverage, new_mutrate, new_genepos, new_cells, new_reactivity, new_normalized_reactivity, new_mutcount)
 
 
 def subset_by_genepos(data: 'ShapeData', genepos_indices: List[int]) -> 'ShapeData':

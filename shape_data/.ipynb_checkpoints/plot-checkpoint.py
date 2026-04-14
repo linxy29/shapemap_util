@@ -510,10 +510,7 @@ def plot_reactivity(
     line_alpha: float = 0.8,
     fill_alpha: float = 0.2,
     variance_style: str = 'fill',
-    spread: str = 'se',
-    use_normalized: bool = True,
     ax: Optional[Any] = None,
-    smoothing: int = 1,
 ) -> Any:
     """
     Plot coverage and reactivity profiles across positions, grouped by cluster.
@@ -553,11 +550,6 @@ def plot_reactivity(
         'errorbar' for error bars (default: 'fill').
     ax : numpy.ndarray of matplotlib.axes.Axes, optional
         Existing axes array of length 2 to plot on. If None, creates new figure.
-    smoothing : int
-        Window size for sliding-window smoothing along positions (default: 1,
-        no smoothing). When smoothing=3, each position's coverage and reactivity
-        become the mean of itself and its two neighbors. Edge positions use
-        reflect mode.
 
     Returns:
     --------
@@ -579,14 +571,8 @@ def plot_reactivity(
         raise ValueError("cells must be a DataFrame with cluster information")
     if cluster_col not in data.cells.columns:
         raise ValueError(f"'{cluster_col}' not found in cells. Available: {list(data.cells.columns)}")
-    if use_normalized:
-        if data.normalized_reactivity is None:
-            raise ValueError("normalized_reactivity is None. Call calculate_reactivity() with normalize=True first.")
-        reactivity_matrix = data.normalized_reactivity
-    else:
-        if data.reactivity is None:
-            raise ValueError("reactivity matrix is None. Call calculate_reactivity() first.")
-        reactivity_matrix = data.reactivity
+    if data.reactivity is None:
+        raise ValueError("reactivity matrix is None. Call calculate_reactivity() first.")
 
     # Determine position mask
     n_pos = data.coverage.shape[0]
@@ -631,32 +617,8 @@ def plot_reactivity(
 
     # Slice matrices to selected positions
     cov_sub = data.coverage[pos_indices, :]
-    react_sub = reactivity_matrix[pos_indices, :]
-
-    # Apply smoothing along positions if requested
-    if smoothing > 1:
-        from scipy.ndimage import uniform_filter1d
-        # Coverage: no NaN, uniform_filter1d is fine
-        if sparse.issparse(cov_sub):
-            cov_sub = sparse.csr_matrix(uniform_filter1d(cov_sub.toarray().astype(float), size=smoothing, axis=0))
-        else:
-            cov_sub = uniform_filter1d(np.asarray(cov_sub, dtype=float), size=smoothing, axis=0)
-        # Reactivity: contains NaN, use nan-aware rolling mean with reflect padding
-        react_float = react_sub.astype(float)
-        half = smoothing // 2
-        n_pos = react_float.shape[0]
-        react_smoothed = np.empty_like(react_float)
-        for i in range(n_pos):
-            indices = []
-            for j in range(i - half, i + half + 1):
-                if j < 0:
-                    indices.append(-j)  # reflect
-                elif j >= n_pos:
-                    indices.append(2 * (n_pos - 1) - j)  # reflect
-                else:
-                    indices.append(j)
-            react_smoothed[i] = np.nanmean(react_float[indices], axis=0)
-        react_sub = react_smoothed
+    # reactivity is dense (numpy array)
+    react_sub = data.reactivity[pos_indices, :]
 
     # Create figure
     if figsize is None:
@@ -683,42 +645,12 @@ def plot_reactivity(
         else:
             cov_dense = np.asarray(cov_cluster)
         cov_mean = np.mean(cov_dense, axis=1)
+        cov_std = np.std(cov_dense, axis=1)
 
         # Reactivity: dense array with NaN
         react_cluster = react_sub[:, cell_mask]
         react_mean = np.nanmean(react_cluster, axis=1)
-
-        # Compute spread bands
-        if spread == 'std':
-            cov_lo = cov_mean - np.std(cov_dense, axis=1)
-            cov_hi = cov_mean + np.std(cov_dense, axis=1)
-            react_lo = react_mean - np.nanstd(react_cluster, axis=1)
-            react_hi = react_mean + np.nanstd(react_cluster, axis=1)
-        elif spread == 'se':
-            cov_se = np.std(cov_dense, axis=1) / np.sqrt(n_cells)
-            cov_lo = cov_mean - cov_se
-            cov_hi = cov_mean + cov_se
-            n_valid = np.sum(~np.isnan(react_cluster), axis=1).astype(float)
-            n_valid[n_valid == 0] = np.nan
-            react_se = np.nanstd(react_cluster, axis=1) / np.sqrt(n_valid)
-            react_lo = react_mean - react_se
-            react_hi = react_mean + react_se
-        elif spread == 'ci95':
-            cov_se = np.std(cov_dense, axis=1) / np.sqrt(n_cells)
-            cov_lo = cov_mean - 1.96 * cov_se
-            cov_hi = cov_mean + 1.96 * cov_se
-            n_valid = np.sum(~np.isnan(react_cluster), axis=1).astype(float)
-            n_valid[n_valid == 0] = np.nan
-            react_se = np.nanstd(react_cluster, axis=1) / np.sqrt(n_valid)
-            react_lo = react_mean - 1.96 * react_se
-            react_hi = react_mean + 1.96 * react_se
-        elif spread == 'iqr':
-            cov_lo = np.percentile(cov_dense, 25, axis=1)
-            cov_hi = np.percentile(cov_dense, 75, axis=1)
-            react_lo = np.nanpercentile(react_cluster, 25, axis=1)
-            react_hi = np.nanpercentile(react_cluster, 75, axis=1)
-        else:
-            raise ValueError(f"spread must be 'std', 'se', 'ci95', or 'iqr', got '{spread}'")
+        react_std = np.nanstd(react_cluster, axis=1)
 
         label = f"{cluster} (n={n_cells})"
         color = colors[ci]
@@ -726,20 +658,20 @@ def plot_reactivity(
         # Plot coverage
         ax_cov.plot(x_positions, cov_mean, label=label, color=color, alpha=line_alpha)
         if variance_style == 'fill':
-            ax_cov.fill_between(x_positions, cov_lo, cov_hi,
+            ax_cov.fill_between(x_positions, cov_mean - cov_std, cov_mean + cov_std,
                                 color=color, alpha=fill_alpha)
         else:
-            ax_cov.errorbar(x_positions, cov_mean, yerr=[cov_mean - cov_lo, cov_hi - cov_mean],
-                            color=color, alpha=line_alpha, capsize=2, fmt='none')
+            ax_cov.errorbar(x_positions, cov_mean, yerr=cov_std, color=color,
+                            alpha=line_alpha, capsize=2, fmt='none')
 
         # Plot reactivity
         ax_react.plot(x_positions, react_mean, label=label, color=color, alpha=line_alpha)
         if variance_style == 'fill':
-            ax_react.fill_between(x_positions, react_lo, react_hi,
+            ax_react.fill_between(x_positions, react_mean - react_std, react_mean + react_std,
                                   color=color, alpha=fill_alpha)
         else:
-            ax_react.errorbar(x_positions, react_mean, yerr=[react_mean - react_lo, react_hi - react_mean],
-                              color=color, alpha=line_alpha, capsize=2, fmt='none')
+            ax_react.errorbar(x_positions, react_mean, yerr=react_std, color=color,
+                              alpha=line_alpha, capsize=2, fmt='none')
 
     ax_cov.set_ylabel('Coverage')
     ax_cov.legend(title=cluster_col, fontsize='small')

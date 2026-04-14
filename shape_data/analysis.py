@@ -339,6 +339,245 @@ def calculate_reactivity(
             print("Dropped mutrate matrix to free memory")
 
 
+def calculate_reactivity_from_control(
+    data: 'ShapeData',
+    control_data: 'ShapeData',
+    ref_column: str = 'ref_metabin',
+    store_as: str = 'reactivity',
+    normalize: bool = True,
+    normalize_method: str = 'box',
+    store_normalized_as: str = 'normalized_reactivity',
+    verbose: bool = True
+) -> None:
+    """
+    Calculate reactivity by subtracting matched control mutrate per cell.
+
+    For each cell in data, finds the corresponding control cell via the
+    ref_column mapping in control_data.cells, then computes:
+
+        reactivity[pos, cell] = mutrate[pos, cell] - control_mutrate[pos, matched_control_cell]
+
+    This is designed for metabin-level data where each treatment metabin
+    has a matched control (e.g., DMSO) metabin.
+
+    Parameters
+    ----------
+    data : ShapeData
+        Treatment ShapeData (e.g., 2A3). Reactivity is stored here.
+    control_data : ShapeData
+        Control ShapeData (e.g., DMSO) with ref_column in cells DataFrame.
+    ref_column : str
+        Column in control_data.cells mapping control cells to treatment cells.
+        Values should match cell names (index) in data.
+    store_as : str
+        Attribute name to store reactivity matrix (default: 'reactivity').
+    normalize : bool
+        If True, compute normalized reactivity per cell per gene (default: True).
+    normalize_method : str
+        Normalization method: 'box' (default), 'zscore', or 'minmax'.
+    store_normalized_as : str
+        Attribute name for normalized reactivity (default: 'normalized_reactivity').
+    verbose : bool
+        Whether to print progress information (default: True).
+
+    Returns
+    -------
+    None
+        Results stored as data.{store_as} and data.{store_normalized_as}.
+    """
+    # Validate inputs
+    if data.mutrate is None:
+        raise ValueError("data.mutrate is None. Treatment data must have a mutrate matrix.")
+    if control_data.mutrate is None:
+        raise ValueError("control_data.mutrate is None. Control data must have a mutrate matrix.")
+    if not control_data.cells_is_df:
+        raise ValueError("control_data.cells must be a DataFrame with ref_column.")
+    if ref_column not in control_data.cells.columns:
+        raise ValueError(
+            f"Column '{ref_column}' not found in control_data.cells. "
+            f"Available columns: {list(control_data.cells.columns)}"
+        )
+
+    # Build genepos ID lists for position alignment
+    def _get_genepos_ids(genepos):
+        if isinstance(genepos, pd.DataFrame):
+            if genepos.index.name in ('gene.pos', 'position'):
+                return list(genepos.index)
+            elif 'gene' in genepos.columns and 'pos' in genepos.columns:
+                return [f"{g}.{p}" for g, p in zip(genepos['gene'], genepos['pos'])]
+            else:
+                return list(genepos.index)
+        else:
+            return [str(x) for x in genepos]
+
+    treat_genepos_ids = _get_genepos_ids(data.genepos)
+    ctrl_genepos_ids = _get_genepos_ids(control_data.genepos)
+
+    # Find shared positions and their indices in each dataset
+    ctrl_id_to_idx = {gid: i for i, gid in enumerate(ctrl_genepos_ids)}
+    shared_treat_indices = []
+    shared_ctrl_indices = []
+    for treat_i, gid in enumerate(treat_genepos_ids):
+        if gid in ctrl_id_to_idx:
+            shared_treat_indices.append(treat_i)
+            shared_ctrl_indices.append(ctrl_id_to_idx[gid])
+
+    shared_treat_indices = np.array(shared_treat_indices)
+    shared_ctrl_indices = np.array(shared_ctrl_indices)
+
+    if len(shared_treat_indices) == 0:
+        raise ValueError("No shared positions found between treatment and control genepos.")
+
+    if verbose:
+        print(f"Position alignment:")
+        print(f"  Treatment positions: {len(treat_genepos_ids)}")
+        print(f"  Control positions: {len(ctrl_genepos_ids)}")
+        print(f"  Shared positions: {len(shared_treat_indices)}")
+
+    # Build mapping: ref_metabin_name -> control column index
+    control_cell_names = (
+        control_data.cells.index.tolist() if control_data.cells_is_df
+        else control_data.cell_names
+    )
+    ref_to_ctrl_idx = {}
+    for ctrl_idx, ctrl_name in enumerate(control_cell_names):
+        ref_name = str(control_data.cells.loc[ctrl_name, ref_column])
+        ref_to_ctrl_idx[ref_name] = ctrl_idx
+
+    # Get treatment cell names
+    treat_cell_names = data.cell_names
+
+    # Initialize reactivity matrix (same shape as treatment data)
+    n_positions, n_cells = data.mutrate.shape
+    reactivity_matrix = np.full((n_positions, n_cells), np.nan, dtype=np.float32)
+
+    if verbose:
+        print(f"\nCalculating reactivity from matched control...")
+        print(f"  Treatment cells: {n_cells}")
+        print(f"  Control cells: {control_data.n_cells}")
+
+    matched = 0
+    unmatched = []
+    for treat_idx, treat_name in enumerate(treat_cell_names):
+        if treat_name not in ref_to_ctrl_idx:
+            unmatched.append(treat_name)
+            continue
+
+        ctrl_idx = ref_to_ctrl_idx[treat_name]
+        matched += 1
+
+        # Get mutrate/coverage vectors at shared positions only
+        treat_mut = data.mutrate[shared_treat_indices, treat_idx].toarray().ravel()
+        ctrl_mut = control_data.mutrate[shared_ctrl_indices, ctrl_idx].toarray().ravel()
+        treat_cov = data.coverage[shared_treat_indices, treat_idx].toarray().ravel()
+        ctrl_cov = control_data.coverage[shared_ctrl_indices, ctrl_idx].toarray().ravel()
+
+        # reactivity = treatment - control
+        react = treat_mut - ctrl_mut
+
+        # Set NaN where treatment or control has no coverage
+        react[(treat_cov == 0) | (ctrl_cov == 0)] = np.nan
+
+        # Fill into the output matrix at the shared treatment positions
+        reactivity_matrix[shared_treat_indices, treat_idx] = react
+
+    if verbose:
+        print(f"  Matched cells: {matched}")
+        if unmatched:
+            print(f"  Unmatched cells ({len(unmatched)}): {unmatched[:5]}{'...' if len(unmatched) > 5 else ''}")
+        total_non_nan = np.sum(~np.isnan(reactivity_matrix))
+        print(f"  Non-NaN values: {total_non_nan:,}")
+        valid = reactivity_matrix[~np.isnan(reactivity_matrix)]
+        if len(valid) > 0:
+            print(f"  Reactivity range: [{valid.min():.6f}, {valid.max():.6f}], mean={valid.mean():.6f}")
+
+    # Store reactivity
+    if store_as:
+        setattr(data, store_as, reactivity_matrix)
+        if verbose:
+            print(f"\nStored as data.{store_as}")
+
+    # Normalize reactivity per cell per gene
+    if normalize:
+        if not isinstance(data.genepos, pd.DataFrame) or 'gene' not in data.genepos.columns:
+            raise ValueError(
+                "Normalization requires data.genepos to be a DataFrame with a 'gene' column."
+            )
+
+        if verbose:
+            print(f"\nNormalizing reactivity per cell per gene (method: {normalize_method})")
+
+        genes = data.genepos['gene'].unique()
+        normalized_matrix = np.full_like(reactivity_matrix, np.nan)
+
+        for gene in genes:
+            gene_mask = data.genepos['gene'] == gene
+            gene_pos_indices = np.where(gene_mask)[0]
+
+            if len(gene_pos_indices) == 0:
+                continue
+
+            gene_reactivity = reactivity_matrix[gene_pos_indices, :]
+
+            for cell_idx in range(gene_reactivity.shape[1]):
+                cell_values = gene_reactivity[:, cell_idx]
+                valid_mask = ~np.isnan(cell_values)
+
+                if valid_mask.sum() < 2:
+                    continue
+
+                valid_values = cell_values[valid_mask]
+
+                if normalize_method == 'box':
+                    p90 = np.percentile(valid_values, 90)
+                    p95 = np.percentile(valid_values, 95)
+                    box_values = valid_values[(valid_values >= p90) & (valid_values <= p95)]
+
+                    if len(box_values) > 0:
+                        norm_factor = np.mean(box_values)
+                        if norm_factor > 0:
+                            normalized = cell_values / norm_factor
+                            normalized = np.clip(normalized, 0, None)
+                            normalized_matrix[gene_pos_indices, cell_idx] = normalized
+                        else:
+                            normalized_matrix[gene_pos_indices, cell_idx] = np.clip(cell_values, 0, None)
+                    else:
+                        if p95 > 0:
+                            normalized = cell_values / p95
+                            normalized = np.clip(normalized, 0, None)
+                            normalized_matrix[gene_pos_indices, cell_idx] = normalized
+
+                elif normalize_method == 'zscore':
+                    mean_val = np.nanmean(valid_values)
+                    std_val = np.nanstd(valid_values)
+                    if std_val > 0:
+                        normalized = (cell_values - mean_val) / std_val
+                        normalized_matrix[gene_pos_indices, cell_idx] = normalized
+
+                elif normalize_method == 'minmax':
+                    min_val = np.nanmin(valid_values)
+                    max_val = np.nanmax(valid_values)
+                    if max_val > min_val:
+                        normalized = (cell_values - min_val) / (max_val - min_val)
+                        normalized_matrix[gene_pos_indices, cell_idx] = normalized
+
+                else:
+                    raise ValueError(f"Unknown normalize_method: {normalize_method}. "
+                                   f"Use 'box', 'zscore', or 'minmax'.")
+
+        if store_normalized_as:
+            setattr(data, store_normalized_as, normalized_matrix)
+
+        if verbose:
+            total_non_nan = np.sum(~np.isnan(normalized_matrix))
+            print(f"Normalized reactivity matrix:")
+            print(f"  Non-NaN values: {total_non_nan:,}")
+            valid_norm = normalized_matrix[~np.isnan(normalized_matrix)]
+            if len(valid_norm) > 0:
+                print(f"  Range: [{valid_norm.min():.4f}, {valid_norm.max():.4f}], mean={valid_norm.mean():.4f}")
+            print(f"\nStored as data.{store_normalized_as}")
+
+
 def calculate_cell_correlation(
     data: 'ShapeData',
     gene: str,
@@ -1060,9 +1299,13 @@ def differential_reactivity_lm(
     if cluster_column is not None and cluster_value is not None:
         if cluster_column not in data.cells.columns:
             raise ValueError(f"Cluster column '{cluster_column}' not found in cells metadata.")
-        cell_mask = data.cells[cluster_column] == cluster_value
+        if isinstance(cluster_value, list):
+            cell_mask = data.cells[cluster_column].isin(cluster_value)
+        else:
+            cell_mask = data.cells[cluster_column] == cluster_value
         if verbose:
-            print(f"Filtering to cluster: {cluster_column} == {cluster_value}")
+            print(f"Filtering to cluster: {cluster_column} in {cluster_value}" if isinstance(cluster_value, list)
+                  else f"Filtering to cluster: {cluster_column} == {cluster_value}")
     elif cluster_column is not None:
         # Filter to cells that have non-null cluster values
         cell_mask = data.cells[cluster_column].notna()
@@ -1084,7 +1327,7 @@ def differential_reactivity_lm(
         col = cells_df[var]
         if col.dtype == 'object' or col.dtype.name == 'category':
             # Categorical: create dummy variables (drop first level as reference)
-            dummies = pd.get_dummies(col, prefix=var, drop_first=True)
+            dummies = pd.get_dummies(col, prefix=var, drop_first=True, dtype=float)
             X_parts.append(dummies)
             var_names.extend(dummies.columns.tolist())
         else:
@@ -1165,13 +1408,18 @@ def differential_reactivity_lm(
 
     # Apply multiple testing correction
     if correct_multiple and len(results_df) > 0:
-        # Correct within each variable
+        results_df['pvalue_adj'] = np.nan
+        # Correct within each variable, skipping NaN p-values
         for var in results_df['variable'].unique():
             var_mask = results_df['variable'] == var
             pvals = results_df.loc[var_mask, 'pvalue'].values
+            valid = ~np.isnan(pvals)
 
-            _, pvals_adj, _, _ = multipletests(pvals, method=correction_method)
-            results_df.loc[var_mask, 'pvalue_adj'] = pvals_adj
+            if valid.sum() > 0:
+                _, pvals_adj, _, _ = multipletests(pvals[valid], method=correction_method)
+                adj_full = np.full(len(pvals), np.nan)
+                adj_full[valid] = pvals_adj
+                results_df.loc[var_mask, 'pvalue_adj'] = adj_full
 
         if verbose:
             for var in results_df['variable'].unique():

@@ -49,7 +49,7 @@ def add_genepos_counts(data: 'ShapeData', inplace: bool = True) -> Optional['Sha
 def join_cell_metadata(
     data: 'ShapeData',
     metadata_df: pd.DataFrame,
-    columns: Union[str, List[str], None] = None,
+    columns: Union[str, List[str]],
     on: str = 'cell',
     how: str = 'left',
     inplace: bool = True
@@ -63,9 +63,8 @@ def join_cell_metadata(
         The ShapeData object to modify
     metadata_df : pd.DataFrame
         DataFrame with metadata to join
-    columns : str, list of str, or None
-        Column(s) to join from metadata_df. If None, join all columns
-        except the `on` column.
+    columns : str or list of str
+        Column(s) to join from metadata_df
     on : str
         Column in metadata_df that contains cell identifiers (default: 'cell')
     how : str
@@ -80,32 +79,17 @@ def join_cell_metadata(
     if isinstance(columns, str):
         columns = [columns]
 
-    # Determine which columns to join
-    join_df = metadata_df.set_index(on)
-    if columns is not None:
-        join_df = join_df[columns]
-    joined_columns = list(join_df.columns)
-
     # Ensure cells is a DataFrame
     if inplace:
         if not data.cells_is_df:
             data.cells = pd.DataFrame(index=data.cells)
             data.cells.index.name = 'cell'
 
-        n_total_cells = len(data.cells)
-        n_metadata_rows = len(metadata_df)
-
         # Join the columns
-        data.cells = data.cells.join(join_df, how=how)
-
-        # Count cells that have non-null metadata after join
-        n_with_metadata = data.cells[joined_columns].notna().any(axis=1).sum()
-        prop_with_metadata = n_with_metadata / n_total_cells if n_total_cells > 0 else 0
-
-        print(f"Total cells: {n_total_cells:,}")
-        print(f"Rows in metadata_df: {n_metadata_rows:,}")
-        print(f"Cells with metadata: {n_with_metadata:,} / {n_total_cells:,} ({100 * prop_with_metadata:.2f}%)")
-
+        data.cells = data.cells.join(
+            metadata_df.set_index(on)[columns],
+            how=how
+        )
         return None
     else:
         new_data = data.to_cells_df()
@@ -116,7 +100,7 @@ def join_cell_metadata(
 def join_genepos_metadata(
     data: 'ShapeData',
     metadata_df: pd.DataFrame,
-    columns: Union[str, List[str], None] = None,
+    columns: Union[str, List[str]],
     on: Union[str, List[str]] = None,
     how: str = 'left',
     inplace: bool = True
@@ -130,9 +114,8 @@ def join_genepos_metadata(
         The ShapeData object to modify
     metadata_df : pd.DataFrame
         DataFrame with metadata to join
-    columns : str, list of str, or None
-        Column(s) to join from metadata_df. If None, join all columns
-        except the `on` column(s).
+    columns : str or list of str
+        Column(s) to join from metadata_df
     on : str or list of str, optional
         Column(s) to join on (must exist in both genepos and metadata_df).
         Default: ['gene', 'pos']
@@ -162,15 +145,13 @@ def join_genepos_metadata(
             "Use to_genepos_df() first or provide genepos as DataFrame during initialization."
         )
 
-    # Determine which columns to merge
-    on_list = on if isinstance(on, list) else [on]
-    if columns is not None:
-        merge_df = metadata_df[on_list + columns]
-    else:
-        merge_df = metadata_df
-
     if inplace:
-        data.genepos = data.genepos.merge(merge_df, on=on, how=how)
+        # Merge the columns
+        data.genepos = data.genepos.merge(
+            metadata_df[on + columns] if isinstance(on, list) else metadata_df[[on] + columns],
+            on=on,
+            how=how
+        )
         return None
     else:
         new_data = data.copy()
