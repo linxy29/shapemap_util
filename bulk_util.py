@@ -16,7 +16,9 @@ import pysam
 
 MUTRATE_COLUMNS = ["gene", "pos", "pos+1", "gene.position", "mutrate", "strand", "coverage", "coverage_withIndel", "mutant", "normalized_cov", "g_readcount", "refnt", "detail"]
 
-def _as_gene_list(genes: Union[str, Iterable[str]]) -> list[str]:
+def _as_gene_list(genes: Union[str, Iterable[str], None]) -> list[str] | None:
+    if genes is None:
+        return None
     if isinstance(genes, str):
         return [genes]
     return list(genes)
@@ -24,16 +26,22 @@ def _as_gene_list(genes: Union[str, Iterable[str]]) -> list[str]:
 
 def read_genes(
     bgz_path: str,
-    genes: Union[str, Iterable[str]],
+    genes: Union[str, Iterable[str], None],
     columns: Sequence[str] | None = None,
+    min_coverage: float | None = None,
+    coverage_col: str = "coverage",
 ) -> pd.DataFrame:
     """Fetch all rows for ``genes`` from a tabix-indexed mutrate file.
 
     Parameters
     ----------
     bgz_path : path to a ``*.mutrate.txt.bgz`` file (``.tbi`` must sit next to it).
-    genes    : single gene name or iterable of gene names.
+    genes    : single gene name, iterable of gene names, or ``None`` to read
+               every gene in the file.
     columns  : optional subset of ``MUTRATE_COLUMNS`` to return; default is all.
+    min_coverage : if set, drop rows where ``coverage_col`` < this value.
+    coverage_col : which column to threshold on (``coverage`` or
+                   ``coverage_withIndel``).
 
     Returns
     -------
@@ -49,12 +57,16 @@ def read_genes(
     gene_list = _as_gene_list(genes)
     rows: list[list[str]] = []
     with pysam.TabixFile(bgz_path) as tbx:
-        available = set(tbx.contigs)
-        for g in gene_list:
-            if g not in available:
-                continue
-            for line in tbx.fetch(g):
+        if gene_list is None:
+            for line in tbx.fetch():
                 rows.append(line.split("\t"))
+        else:
+            available = set(tbx.contigs)
+            for g in gene_list:
+                if g not in available:
+                    continue
+                for line in tbx.fetch(g):
+                    rows.append(line.split("\t"))
 
     df = pd.DataFrame(rows, columns=MUTRATE_COLUMNS)
     if df.empty:
@@ -65,14 +77,21 @@ def read_genes(
     for c in numeric_cols:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
+    if min_coverage is not None:
+        if coverage_col not in df.columns:
+            raise KeyError(f"coverage_col {coverage_col!r} not in {list(df.columns)}")
+        df = df[df[coverage_col] >= min_coverage].reset_index(drop=True)
+
     return df if columns is None else df[list(columns)]
 
 
 def read_genes_multi(
     bgz_paths: dict[str, str] | Sequence[str],
-    genes: Union[str, Iterable[str]],
+    genes: Union[str, Iterable[str], None],
     columns: Sequence[str] | None = None,
     source_col: str = "source",
+    min_coverage: float | None = None,
+    coverage_col: str = "coverage",
 ) -> pd.DataFrame:
     """Fetch ``genes`` from many bgz files and concatenate the results.
 
@@ -80,10 +99,14 @@ def read_genes_multi(
     ----------
     bgz_paths : either a {label: path} dict (label written into ``source_col``)
                 or a sequence of paths (file basename used as the label).
-    genes     : single gene name or iterable of gene names.
+    genes     : single gene name, iterable of gene names, or ``None`` to read
+                every gene in each file.
     columns   : optional subset of ``MUTRATE_COLUMNS`` to return (the
                 ``source_col`` is always added).
     source_col: name of the column that records which file a row came from.
+    min_coverage : if set, drop rows where ``coverage_col`` < this value.
+    coverage_col : which column to threshold on (``coverage`` or
+                   ``coverage_withIndel``).
 
     Returns
     -------
@@ -96,7 +119,12 @@ def read_genes_multi(
 
     parts = []
     for label, path in items:
-        sub = read_genes(path, genes, columns=columns)
+        sub = read_genes(
+            path, genes,
+            columns=columns,
+            min_coverage=min_coverage,
+            coverage_col=coverage_col,
+        )
         if sub.empty:
             continue
         sub.insert(0, source_col, label)

@@ -18,13 +18,14 @@ def combine(
     data_dict: Dict[str, 'ShapeData'],
     sample_column: str = 'sample',
     cell_prefix: bool = True,
+    join: str = 'inner',
     verbose: bool = True
 ) -> 'ShapeData':
     """
     Combine multiple ShapeData objects into one by horizontally stacking matrices.
 
-    All objects must share the same positions (rows). Cells (columns) are
-    concatenated, and a sample column is added to cells metadata.
+    Cells (columns) are concatenated, and a sample column is added to cells
+    metadata. Positions (rows) are aligned across samples according to ``join``.
 
     Parameters:
     -----------
@@ -34,6 +35,12 @@ def combine(
         Column name added to cells DataFrame to track sample origin (default: 'sample').
     cell_prefix : bool
         If True, prefix cell barcodes with sample name to avoid collisions (default: True).
+    join : str
+        How to align positions across samples:
+        - 'inner' (default): keep only positions present in ALL samples (intersection).
+        - 'outer': keep positions present in ANY sample (union). For samples that
+          are missing a given position, that row is filled with sparse zeros in
+          coverage, mutrate, and mutcount.
     verbose : bool
         Print progress information (default: True).
 
@@ -46,11 +53,15 @@ def combine(
     >>> sd1 = ShapeData(cov1, mut1, pos1, cells1)
     >>> sd2 = ShapeData(cov2, mut2, pos2, cells2)
     >>> combined = ShapeData.combine({'nain3_1': sd1, 'dmso_1': sd2})
+    >>> # Keep all positions across samples instead of intersecting:
+    >>> combined = ShapeData.combine({'nain3_1': sd1, 'dmso_1': sd2}, join='outer')
     """
     from .core import ShapeData
 
     if not data_dict:
         raise ValueError("data_dict is empty")
+    if join not in ('inner', 'outer'):
+        raise ValueError(f"join must be 'inner' or 'outer', got {join!r}")
 
     names = list(data_dict.keys())
     first = data_dict[names[0]]
@@ -62,18 +73,22 @@ def combine(
             return sd.genepos.index
         return pd.Index(sd.genepos)
 
-    # Find common positions across ALL samples
-    common_idx = _get_idx(first)
+    # Combine position indices across ALL samples (intersection or union)
+    combined_idx = _get_idx(first)
     all_match = True
     for sd in data_dict.values():
         cur_idx = _get_idx(sd)
-        if not cur_idx.equals(common_idx):
+        if not cur_idx.equals(combined_idx):
             all_match = False
-            common_idx = common_idx.intersection(cur_idx)
+            if join == 'inner':
+                combined_idx = combined_idx.intersection(cur_idx)
+            else:  # outer
+                combined_idx = combined_idx.union(cur_idx, sort=False)
 
     if not all_match and verbose:
+        kind = 'common' if join == 'inner' else 'union'
         print(f"WARNING: Positions differ across samples. "
-              f"Using {len(common_idx)} common positions.")
+              f"Using {len(combined_idx)} {kind} positions.")
 
     cov_list = []
     mut_list = []
@@ -81,6 +96,27 @@ def combine(
     all_cells = []
     sample_labels = []
     has_mutcount = all(hasattr(sd, 'mutcount') and sd.mutcount is not None for sd in data_dict.values())
+
+    n_target = len(combined_idx)
+
+    def _reindex_to_outer(mat, cur_idx):
+        """Reindex sparse matrix rows from cur_idx to combined_idx ordering.
+        Rows present in combined_idx but missing from cur_idx are sparse zeros.
+        """
+        if mat is None:
+            return None
+        # positions[i] = row index in cur_idx for combined_idx[i], or -1 if absent
+        positions = cur_idx.get_indexer(combined_idx)
+        valid_target = np.where(positions >= 0)[0]
+        valid_sample = positions[valid_target]
+        sub = mat[valid_sample]  # rows from this sample that map into the union
+        coo = sub.tocoo()
+        new_rows = valid_target[coo.row]
+        return sparse.coo_matrix(
+            (coo.data, (new_rows, coo.col)),
+            shape=(n_target, mat.shape[1]),
+            dtype=mat.dtype,
+        ).tocsr()
 
     for name, sd in data_dict.items():
         cur_idx = _get_idx(sd)
@@ -90,12 +126,17 @@ def combine(
             mut_list.append(sd.mutrate)
             if has_mutcount:
                 mc_list.append(sd.mutcount)
-        else:
-            mask = np.isin(cur_idx, common_idx)
+        elif join == 'inner':
+            mask = np.isin(cur_idx, combined_idx)
             cov_list.append(sd.coverage[mask])
             mut_list.append(sd.mutrate[mask] if sd.mutrate is not None else None)
             if has_mutcount:
                 mc_list.append(sd.mutcount[mask])
+        else:  # outer
+            cov_list.append(_reindex_to_outer(sd.coverage, cur_idx))
+            mut_list.append(_reindex_to_outer(sd.mutrate, cur_idx))
+            if has_mutcount:
+                mc_list.append(_reindex_to_outer(sd.mutcount, cur_idx))
 
         # Cell barcodes
         cell_names = sd.cell_names
@@ -112,20 +153,31 @@ def combine(
         combined_mut = None
     combined_mc = sparse.hstack(mc_list, format='csr') if has_mutcount else None
 
-    # Build genepos for common positions
+    # Build genepos for combined positions
     if all_match:
         genepos_copy = ref_pos.copy() if isinstance(ref_pos, pd.DataFrame) else list(ref_pos)
     elif isinstance(ref_pos, pd.DataFrame):
-        genepos_copy = ref_pos.loc[ref_pos.index.isin(common_idx)].copy()
+        if join == 'inner':
+            genepos_copy = ref_pos.loc[ref_pos.index.isin(combined_idx)].copy()
+        else:  # outer: gather genepos rows from all samples, keep first occurrence
+            all_genepos = pd.concat(
+                [sd.genepos for sd in data_dict.values()
+                 if isinstance(sd.genepos, pd.DataFrame)]
+            )
+            all_genepos = all_genepos[~all_genepos.index.duplicated(keep='first')]
+            genepos_copy = all_genepos.loc[combined_idx].copy()
     else:
-        genepos_copy = [p for p in ref_pos if p in common_idx]
+        if join == 'inner':
+            genepos_copy = [p for p in ref_pos if p in combined_idx]
+        else:
+            genepos_copy = list(combined_idx)
 
     result = ShapeData(combined_cov, combined_mut, genepos_copy, all_cells, mutcount_sparse=combined_mc)
     result = result.to_cells_df()
     result.cells[sample_column] = sample_labels
 
     if verbose:
-        print(f"Combined {len(names)} samples: "
+        print(f"Combined {len(names)} samples ({join} join): "
               f"{result.n_positions:,} positions x {result.n_cells:,} cells")
         for name in names:
             n = data_dict[name].n_cells

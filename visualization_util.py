@@ -122,11 +122,12 @@ def read_mutrate_window_files(directory_path='.', pattern = "_counts_mutrate.10n
     
     return final_df
 
-def calculate_reactivity(signal_df, control_df, index_cols = ['gene', 'pos'], keep_cols=[]):
+def calculate_reactivity(signal_df, control_df, index_cols = ['gene', 'pos'], keep_cols=[],
+                         trim_5=0, trim_3=0, pos_col='pos', gene_col='gene'):
     """
     Calculate reactivity as the difference between signal and control mutational rates.
     Require mutrate and coverage columns in both dataframes as well as the index columns.
-    
+
     Parameters:
     -----------
     signal_df : pandas.DataFrame
@@ -135,7 +136,23 @@ def calculate_reactivity(signal_df, control_df, index_cols = ['gene', 'pos'], ke
         DataFrame containing mutational rates for the control condition (e.g., untreated)
     index_cols : list of str, default ['gene', 'pos']
         Columns to use as index for merging the two DataFrames
-    
+    keep_cols : list of str, default []
+        Extra columns to carry through into the returned DataFrame.
+    trim_5 : int, default 0
+        Drop positions within this many units of the 5' end of each transcript
+        (i.e. pos < min_pos(gene) + trim_5). Units are whatever pos_col uses
+        (nucleotides for pos_col='pos', windows for pos_col='win'). The 5' / 3'
+        ends of a transcript often carry artifactual reactivity from RT priming
+        bias and library-prep edge effects; trimming masks them before any
+        downstream normalization.
+    trim_3 : int, default 0
+        Drop positions within this many units of the 3' end of each transcript
+        (i.e. pos > max_pos(gene) - trim_3). Same units as trim_5.
+    pos_col : str, default 'pos'
+        Name of the position column used for edge trimming.
+    gene_col : str, default 'gene'
+        Name of the gene/transcript column used to scope edge trimming.
+
     Returns:
     --------
     pandas.DataFrame
@@ -154,13 +171,45 @@ def calculate_reactivity(signal_df, control_df, index_cols = ['gene', 'pos'], ke
 
     # Exclude rows with NA values in mutrate columns
     merged_df = merged_df.dropna(subset=['mutrate_signal', 'mutrate_control'])
-    
+
     # Calculate reactivity
     merged_df['reactivity'] = merged_df['mutrate_signal'] - merged_df['mutrate_control']
-    
+
+    # Trim 5' / 3' edge positions per transcript using observed min/max in pos_col
+    if trim_5 > 0 or trim_3 > 0:
+        if gene_col not in merged_df.columns or pos_col not in merged_df.columns:
+            raise ValueError(
+                f"trim_5/trim_3 require '{gene_col}' and '{pos_col}' columns in the merged DataFrame; "
+                f"got columns {list(merged_df.columns)}"
+            )
+        bounds = merged_df.groupby(gene_col)[pos_col].agg(_trim_min='min', _trim_max='max')
+        merged_df = merged_df.merge(bounds, left_on=gene_col, right_index=True)
+        keep_mask = (merged_df[pos_col] >= merged_df['_trim_min'] + trim_5) & \
+                    (merged_df[pos_col] <= merged_df['_trim_max'] - trim_3)
+        n_dropped = (~keep_mask).sum()
+        if n_dropped:
+            print(f"Edge trim (5'={trim_5}, 3'={trim_3}) dropped {n_dropped} positions across {bounds.shape[0]} {gene_col}(s).")
+        merged_df = merged_df[keep_mask].drop(columns=['_trim_min', '_trim_max'])
+
+    # Resolve keep_cols that may have been suffixed by the merge (present in both inputs).
+    # Prefer the unsuffixed column if it survived the merge, otherwise fall back to the
+    # _signal copy (assumed equal to _control for per-sample attributes like 'group').
+    resolved_keep_cols = []
+    for col in keep_cols:
+        if col in merged_df.columns:
+            resolved_keep_cols.append(col)
+        elif f"{col}_signal" in merged_df.columns:
+            merged_df = merged_df.rename(columns={f"{col}_signal": col})
+            resolved_keep_cols.append(col)
+        else:
+            raise KeyError(
+                f"keep_cols entry '{col}' not found in merged DataFrame "
+                f"(also looked for '{col}_signal'). Available columns: {list(merged_df.columns)}"
+            )
+
     # Select relevant columns to return
-    result_df = merged_df[index_cols + ['mutrate_signal', 'mutrate_control', 'reactivity', 'coverage_signal', 'coverage_control'] + keep_cols]
-    
+    result_df = merged_df[index_cols + ['mutrate_signal', 'mutrate_control', 'reactivity', 'coverage_signal', 'coverage_control'] + resolved_keep_cols]
+
     return result_df
 
 def gene_normalization_1nt(crude_reac, bottom_winsorize=0.0, top_winsorize=0.0,
@@ -326,11 +375,12 @@ def normalize_reactivity_zy(df, reactivity_columns=None, bottom_winsorize=0.0, t
 
     return result
 
-def get_df_with_normalized_reactivity(signal_df, control_df, index_cols=['gene', 'pos'],
-                                     sample_col="group", percentile=95, normalization_method="normalize_reactivity_zy"):
+def get_df_with_normalized_reactivity(signal_df, control_df, index_cols=['gene', 'pos'], keep_cols=[],
+                                     sample_col="group", percentile=95, normalization_method="normalize_reactivity_zy",
+                                     trim_5=0, trim_3=0, pos_col='pos', gene_col='gene'):
     """
     Add a column of normalized reactivity values to the input DataFrame.
-    
+
     Parameters:
     -----------
     signal_df : pandas.DataFrame
@@ -345,7 +395,14 @@ def get_df_with_normalized_reactivity(signal_df, control_df, index_cols=['gene',
         Percentile value to use for normalization
     normalization_method : str, default "normalize_reactivity_zy"
         Choose normalization method: "normalize_reactivity_zy" or "normalize_reactivity"
-    
+    trim_5, trim_3 : int, default 0
+        5' / 3' edge positions to drop per transcript before normalization. See
+        calculate_reactivity for semantics. Units follow pos_col.
+    pos_col : str, default 'pos'
+        Position column used for edge trimming (e.g. 'pos' for nt, 'win' for windows).
+    gene_col : str, default 'gene'
+        Gene/transcript column used to scope edge trimming.
+
     Returns:
     --------
     pandas.DataFrame
@@ -357,10 +414,13 @@ def get_df_with_normalized_reactivity(signal_df, control_df, index_cols=['gene',
     valid_methods = ["normalize_reactivity_zy", "normalize_reactivity"]
     if normalization_method not in valid_methods:
         raise ValueError(f"normalization_method must be one of {valid_methods}")
-    
-    # Calculate reactivity
+
+    # Calculate reactivity (with optional 5'/3' edge trimming)
     print("Calculating reactivity...")
-    reactivity_df = calculate_reactivity(signal_df, control_df, index_cols=index_cols + [sample_col])
+    reactivity_df = calculate_reactivity(signal_df, control_df, index_cols=index_cols + [sample_col],
+                                         keep_cols=keep_cols,
+                                         trim_5=trim_5, trim_3=trim_3,
+                                         pos_col=pos_col, gene_col=gene_col)
     print("The number of rows in reactivity_df:", len(reactivity_df))
     
     # Normalize reactivity values based on chosen method

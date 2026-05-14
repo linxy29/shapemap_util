@@ -79,7 +79,10 @@ def create_metabins_from_dict(
     metabin_dict: Dict[str, List],
     cell_id_col: str = 'bin100_cellID',
     extra_meta: Optional[Dict[str, dict]] = None,
-    verbose: bool = True
+    verbose: bool = True,
+    ids_col_name: str = 'bin100_ids',
+    count_col_name: str = 'n_bins',
+    index_prefix: str = 'metabin',
 ) -> 'ShapeData':
     """
     Create metabins by aggregating bins according to a dictionary of groupings.
@@ -210,8 +213,8 @@ def create_metabins_from_dict(
 
         # Build metadata
         meta = {
-            'bin100_ids': matched_ids,
-            'n_bins': len(target_indices),
+            ids_col_name: matched_ids,
+            count_col_name: len(target_indices),
         }
         if extra_meta is not None and metabin_name in extra_meta:
             meta.update(extra_meta[metabin_name])
@@ -232,7 +235,7 @@ def create_metabins_from_dict(
 
     # Build cells DataFrame
     metabin_cells = pd.DataFrame(metabin_meta)
-    metabin_cells.index = [f"metabin_{i}" for i in range(len(metabin_cells))]
+    metabin_cells.index = [f"{index_prefix}_{i}" for i in range(len(metabin_cells))]
     metabin_cells.index.name = 'cell'
 
     # Copy genepos
@@ -240,7 +243,7 @@ def create_metabins_from_dict(
 
     if verbose:
         print(f"Output shape: ({n_positions}, {len(metabin_cells)})")
-        bins_per_metabin = metabin_cells['n_bins']
+        bins_per_metabin = metabin_cells[count_col_name]
         print(f"Bins per metabin: min={bins_per_metabin.min()}, "
               f"median={bins_per_metabin.median():.0f}, "
               f"max={bins_per_metabin.max()}")
@@ -553,4 +556,87 @@ def create_metabins_from_mapping(
 
     return create_metabins_from_dict(
         target_data, metabin_dict, cell_id_col, extra_meta, verbose
+    )
+
+
+def create_metacells(
+    target_data: 'ShapeData',
+    group_col: str,
+    cell_id_col: str = 'bin100_cellID',
+    verbose: bool = True,
+) -> 'ShapeData':
+    """
+    Create metacells by grouping cells that share the same value in `group_col`.
+
+    Each unique non-NaN value in target_data.cells[group_col] becomes one metacell.
+    Coverage / mutcount / mutrate aggregation is delegated to create_metabins_from_dict.
+
+    Parameters
+    ----------
+    target_data : ShapeData
+        The ShapeData whose cells will be aggregated. Must have cells as DataFrame.
+    group_col : str
+        Column name in target_data.cells used for groupby.
+    cell_id_col : str
+        Column name for cell IDs in target_data.cells (default: 'bin100_cellID').
+        If absent, the cells index is used.
+    verbose : bool
+        Print progress information (default: True).
+
+    Returns
+    -------
+    ShapeData
+        New ShapeData with one metacell per unique value of `group_col`.
+        Output cells DataFrame contains:
+        - `group_col`: the group value
+        - 'cellbarcodes': list of original cell IDs in this metacell
+        - 'n_cells': number of cells in this metacell
+
+        Cells with NaN in `group_col` are dropped (count logged when verbose).
+    """
+    if not target_data.cells_is_df:
+        raise ValueError("target_data cells must be a DataFrame. Use to_cells_df() first.")
+
+    cells_df = target_data.cells
+    if group_col not in cells_df.columns:
+        raise ValueError(f"Column '{group_col}' not found in cells metadata. "
+                         f"Available columns: {list(cells_df.columns)}")
+
+    # Resolve cell IDs (column or index)
+    if cell_id_col in cells_df.columns:
+        bin_ids = cells_df[cell_id_col].values
+    else:
+        bin_ids = np.array(cells_df.index)
+
+    # Drop NaN in group_col
+    n_total = len(cells_df)
+    working_df = cells_df.dropna(subset=[group_col])
+    n_dropped = n_total - len(working_df)
+    if verbose and n_dropped > 0:
+        print(f"Dropped {n_dropped} cells with NaN in '{group_col}'")
+
+    if len(working_df) == 0:
+        raise ValueError(f"All cells have NaN in '{group_col}'; nothing to group.")
+
+    # Build metabin_dict and extra_meta from groupby
+    metabin_dict = {}
+    extra_meta = {}
+    for group_value, sub_df in working_df.groupby(group_col, sort=True, dropna=True):
+        positional_idx = cells_df.index.get_indexer(sub_df.index)
+        key = str(group_value)
+        metabin_dict[key] = list(bin_ids[positional_idx])
+        extra_meta[key] = {group_col: group_value}
+
+    if verbose:
+        print(f"Grouping {len(working_df)} cells into {len(metabin_dict)} metacells by '{group_col}'")
+
+    return create_metabins_from_dict(
+        target_data,
+        metabin_dict,
+        cell_id_col=cell_id_col,
+        extra_meta=extra_meta,
+        verbose=verbose,
+        ids_col_name='cellbarcodes',
+        count_col_name='n_cells',
+        index_prefix='metacell',
     )

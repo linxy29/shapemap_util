@@ -41,11 +41,13 @@ from .plot import (
 from .metabin import (
     create_metabins as _create_metabins,
     create_metabins_from_dict as _create_metabins_from_dict,
-    create_metabins_from_mapping as _create_metabins_from_mapping
+    create_metabins_from_mapping as _create_metabins_from_mapping,
+    create_metacells as _create_metacells
 )
 from .io import (
     from_vcf_pair as _from_vcf_pair,
-    from_cellsnp_vcf as _from_cellsnp_vcf
+    from_cellsnp_vcf as _from_cellsnp_vcf,
+    combine as _combine
 )
 
 
@@ -1300,9 +1302,78 @@ class ShapeData:
             self, metabin_dict, cell_id_col, extra_meta, verbose
         )
 
+    def create_metacells(
+        self,
+        group_col: str,
+        cell_id_col: str = 'bin100_cellID',
+        verbose: bool = True,
+    ) -> 'ShapeData':
+        """
+        Group cells that share the same value in `group_col` into metacells.
+
+        Each unique non-NaN value of `group_col` becomes one metacell. Coverage,
+        mutcount, and mutrate are aggregated across grouped cells.
+
+        Parameters:
+        -----------
+        group_col : str
+            Column name in cells metadata used for groupby.
+        cell_id_col : str
+            Column name for cell IDs (default: 'bin100_cellID').
+            If absent, the cells index is used.
+        verbose : bool
+            Print progress information (default: True).
+
+        Returns:
+        --------
+        ShapeData
+            New ShapeData with one metacell per unique value of `group_col`.
+            Output cells contain `group_col`, 'cellbarcodes', and 'n_cells'.
+        """
+        return _create_metacells(self, group_col, cell_id_col, verbose)
+
     # =========================================================================
     # Class methods (delegating to io module)
     # =========================================================================
+
+    @staticmethod
+    def combine(
+        data_dict: Dict[str, 'ShapeData'],
+        sample_column: str = 'sample',
+        cell_prefix: bool = True,
+        join: str = 'inner',
+        verbose: bool = True
+    ) -> 'ShapeData':
+        """
+        Combine multiple ShapeData objects into one by horizontally stacking matrices.
+
+        See ``shape_data.io.combine`` for full documentation.
+
+        Parameters:
+        -----------
+        data_dict : dict
+            Dictionary of {sample_name: ShapeData}.
+        sample_column : str
+            Column name added to cells DataFrame to track sample origin (default: 'sample').
+        cell_prefix : bool
+            If True, prefix cell barcodes with sample name to avoid collisions (default: True).
+        join : str
+            'inner' (default) keeps only positions shared by all samples;
+            'outer' keeps all positions, filling missing rows with sparse zeros.
+        verbose : bool
+            Print progress information (default: True).
+
+        Returns:
+        --------
+        ShapeData
+
+        Example:
+        --------
+        >>> combined = ShapeData.combine({'nain3_1': sd1, 'dmso_1': sd2})
+        >>> combined = ShapeData.combine({'nain3_1': sd1, 'dmso_1': sd2}, join='outer')
+        """
+        return _combine(data_dict, sample_column=sample_column,
+                        cell_prefix=cell_prefix, join=join, verbose=verbose)
 
     @classmethod
     def from_vcf_pair(

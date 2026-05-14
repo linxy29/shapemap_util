@@ -27,7 +27,7 @@ Submodules
 - metadata: Metadata functions (add_genepos_counts, join_cell_metadata, join_genepos_metadata, add_control_data)
 - plot: Plotting functions (plot_violin, plot_violin_multi, plot_reactivity)
 - io: I/O functions (from_vcf_pair, from_cellsnp_vcf)
-- metabin: Metabin functions (create_metabins)
+- metabin: Metabin functions (create_metabins, create_metacells)
 """
 
 from .core import ShapeData
@@ -42,7 +42,7 @@ from .analysis import (
 from .metadata import add_genepos_counts, join_cell_metadata, join_genepos_metadata, add_control_data
 from .plot import plot_violin, plot_violin_multi, plot_reactivity
 from .io import combine, from_vcf_pair, from_cellsnp_vcf
-from .metabin import create_metabins, create_metabins_from_dict, create_metabins_from_mapping
+from .metabin import create_metabins, create_metabins_from_dict, create_metabins_from_mapping, create_metacells
 
 __all__ = [
     # Main class
@@ -78,4 +78,5 @@ __all__ = [
     'create_metabins',
     'create_metabins_from_dict',
     'create_metabins_from_mapping',
+    'create_metacells',
 ]

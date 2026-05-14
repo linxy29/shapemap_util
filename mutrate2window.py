@@ -167,8 +167,11 @@ def main(args):
 
     col_names = ["gene", "pos", "end", "gene.position", "mutrate", "strand", "coverage", "coverage_withIndel", "mutant", "normalized_cov", "g_readcount", "refnt", "detail"]
     #mtr_df = pd.read_csv(args.input_file, sep="\t", names=col_names, index_col = "gene.position", compression='gzip') # Original Gao Ge's version
+    # pandas only auto-infers .gz / .bz2 / .zip / .xz / .zst; force gzip for .bgz
+    # (BGZF is gzip-compatible) so this works on bgzip+tabix mutrate files too.
+    compression = "gzip" if args.input_file.lower().endswith(".bgz") else "infer"
     try:
-        mtr_df = pd.read_csv(args.input_file, sep="\t", names=col_names, header=None, index_col="gene.position")
+        mtr_df = pd.read_csv(args.input_file, sep="\t", names=col_names, header=None, index_col="gene.position", compression=compression)
     except Exception as e:
         print(f"[ERROR] Failed to read input file: {e}")
         sys.exit(1)

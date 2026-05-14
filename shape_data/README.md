@@ -77,6 +77,21 @@ data = ShapeData.from_pickle('my_data.pkl')
 data = ShapeData.load('./my_shapedata/')
 ```
 
+### Combining Multiple ShapeData Objects
+
+Horizontally concatenate cells from several ShapeData objects that share the same
+positions. A `sample` column is added to track origin; cell barcodes can be prefixed
+with the sample name to avoid collisions.
+
+```python
+combined = ShapeData.combine(
+    {'nain3_1': sd1, 'dmso_1': sd2, 'dmso_2': sd3},
+    sample_column='sample',
+    cell_prefix=True,
+)
+print(combined.cells['sample'].value_counts())
+```
+
 ## Data Structure
 
 ```python
@@ -283,6 +298,78 @@ data.calculate_reactivity(
 print(data.reactivity)  # sparse matrix
 ```
 
+### Calculate Reactivity from a Matched Control ShapeData
+
+When treatment and control are stored as separate ShapeData objects (e.g., 2A3 vs DMSO
+metabins) with a one-to-one mapping between them, subtract per-cell control mutrate:
+
+```python
+# control_data.cells must have a column (default 'ref_metabin') whose values
+# match cell names (index) in `data`.
+data.calculate_reactivity_from_control(
+    control_data=dmso_metabins,
+    ref_column='ref_metabin',
+    store_as='reactivity',
+    normalize=True,                  # also produce normalized_reactivity
+    normalize_method='box',          # 'box', 'zscore', or 'minmax'
+)
+
+print(data.reactivity)
+print(data.normalized_reactivity)
+```
+
+### Calculate AUROC vs Known Secondary Structure
+
+For each cell, score reactivity as a predictor of unpaired vs paired bases given a
+dot-bracket structure. Result is saved as a column in cells metadata.
+
+```python
+# Dot-bracket string (or path to a file containing it)
+dot_bracket_18S = "(((...)))..."
+
+data.calculate_auroc(
+    gene='18S',
+    dot_bracket=dot_bracket_18S,
+    skip_positions=[1, 2, 3],       # 1-based positions to exclude
+    save_as='AUROC_18S',            # default: f'AUROC_{gene}'
+)
+
+print(data.cells[['leiden', 'AUROC_18S']].head())
+```
+
+### Differential Reactivity Tests
+
+Two complementary tests across positions, both returning a tidy DataFrame with
+multiple-testing-corrected p-values.
+
+**Linear model** (multiple predictors, continuous or categorical):
+
+```python
+results = data.differential_reactivity_lm(
+    predictors=['diet', 'region'],   # cells columns; categoricals dummy-coded
+    gene='18S',                       # or list of genes, or None for all
+    use_normalized=False,
+    min_cells=10,
+    correction_method='fdr_bh',
+)
+# Columns: gene, pos, variable, coefficient, std_err, t_statistic,
+#          pvalue, pvalue_adj, n_cells, r_squared
+```
+
+**Wilcoxon rank-sum** (two-group comparison):
+
+```python
+results = data.differential_reactivity_wilcoxon(
+    group_column='diet',
+    group1='HFD', group2='CTRL',
+    gene=['18S', '28S'],
+    alternative='two-sided',
+)
+# Columns: gene, pos, statistic, pvalue, pvalue_adj, effect_size,
+#          mean_group1, mean_group2, diff_mean, log2_fold_change,
+#          n_group1, n_group2
+```
+
 ### Calculate Cell Correlation
 
 ```python
@@ -307,6 +394,81 @@ cell_stats = data.get_cell_stats()
 # Per-position statistics
 pos_stats = data.get_position_stats()
 # Returns: n_cells, mean_coverage, mean_mutrate per position
+```
+
+## Aggregating Cells into Metabins / Metacells
+
+Aggregate groups of cells into a smaller number of "meta" cells. Coverage and mutcount
+are summed across the group; mutrate is recomputed as `sum(mutcount) / sum(coverage)`
+(or as a coverage-weighted average when mutcount is unavailable). Each method returns a
+new `ShapeData` whose cells are the aggregated groups.
+
+### Group Cells by a Metadata Column (`create_metacells`)
+
+The simplest grouping: every cell sharing the same value in `group_col` becomes one
+metacell. Cells with `NaN` in `group_col` are dropped (count is logged when verbose).
+
+```python
+# One metacell per unique value of cells['leiden']
+mc = data.create_metacells(group_col='leiden')
+
+# Output cells DataFrame columns:
+#   - 'leiden'        : the group value
+#   - 'cellbarcodes'  : list of original cell IDs in this metacell
+#   - 'n_cells'       : number of cells aggregated
+print(mc.cells.head())
+print(mc.shape)  # (n_positions, n_unique_leiden_values)
+
+# If your cell IDs live in a column other than 'bin100_cellID' (default),
+# specify cell_id_col; if the column is absent, cells.index is used.
+mc = data.create_metacells(group_col='sample', cell_id_col='cell_barcode')
+```
+
+### Group Spatial Bins by Cluster + Spatial Bisection (`create_metabins`)
+
+For spatial data: within each cluster, recursively partition bins along the longer
+spatial axis into balanced groups of approximately `n_bins` bins each.
+
+```python
+mb = data.create_metabins(
+    n_bins=20,                  # target bins per metabin
+    cluster_col='leiden',
+    x_col='x', y_col='y',
+    cell_id_col='bin100_cellID',
+)
+# Output cells contain: leiden, x, y (medoid), bin100_ids, n_bins
+```
+
+### Group Bins from an Explicit Dictionary (`create_metabins_from_dict`)
+
+When you already know which bins belong to each metabin:
+
+```python
+metabin_dict = {
+    'group_A': ['bin_1', 'bin_2', 'bin_3'],
+    'group_B': ['bin_4', 'bin_5'],
+}
+mb = data.create_metabins_from_dict(metabin_dict)
+
+# Optionally attach extra metadata per metabin:
+mb = data.create_metabins_from_dict(
+    metabin_dict,
+    extra_meta={'group_A': {'cluster': 'K562'}, 'group_B': {'cluster': 'HEK'}},
+)
+```
+
+### Reuse a Reference Grouping on a Target Sample (`create_metabins_from_mapping`)
+
+Apply the metabin structure of a reference ShapeData (e.g., f2a3) to a target sample
+(e.g., DMSO) via a bin-to-bin mapping table:
+
+```python
+target_mb = dmso_data.create_metabins_from_mapping(
+    ref_metabin_data=f2a3_metabins,
+    mapping_df=bin_mapping_df,
+    ref_bin_col='f2a3_bin',
+    target_bin_col='mapped_dmso_bin',
+)
 ```
 
 ## Save and Load
@@ -382,6 +544,28 @@ fig = data.plot_violin_multi(
 )
 ```
 
+### Coverage / Reactivity Profile by Cluster
+
+Two stacked subplots: mean coverage (top) and mean reactivity (bottom) along positions,
+one line per cluster, with shaded variance bands. Requires `data.reactivity` to exist
+(call `calculate_reactivity` or `calculate_reactivity_from_control` first).
+
+```python
+# Plot full gene profile by cluster
+axes = data.plot_reactivity(gene='18S', cluster_col='leiden')
+
+# Plot a position range with specific clusters and smoothing
+axes = data.plot_reactivity(
+    pos_range=(100, 300),
+    clusters=['0', '1', '2'],
+    use_normalized=True,
+    spread='se',                  # 'se', 'std', or 'ci'
+    smoothing=3,                  # rolling mean window
+    palette='Set2',
+    figsize=(12, 6),
+)
+```
+
 ## Complete Workflow Example
 
 ```python
@@ -449,6 +633,7 @@ print(f"Final dataset: {data}")
 | `from_cellsnp_vcf()` | Create from cellSNP VCF |
 | `from_pickle()` | Load from pickle file |
 | `load()` | Load from directory |
+| `combine()` | Concatenate multiple ShapeData objects (shared positions) |
 | `to_pickle()` | Save to pickle file |
 | `save()` | Save to directory |
 | `copy()` | Deep copy |
@@ -478,8 +663,12 @@ print(f"Final dataset: {data}")
 
 | Method | Description |
 |--------|-------------|
-| `calculate_reactivity()` | Calculate reactivity matrix |
+| `calculate_reactivity()` | Reactivity from per-cluster control columns |
+| `calculate_reactivity_from_control()` | Reactivity from a matched control ShapeData |
 | `calculate_cell_correlation()` | Pairwise cell correlation |
+| `calculate_auroc()` | AUROC of reactivity vs dot-bracket structure |
+| `differential_reactivity_lm()` | Linear-model differential reactivity test |
+| `differential_reactivity_wilcoxon()` | Wilcoxon rank-sum differential reactivity test |
 | `get_cell_stats()` | Statistics per cell |
 | `get_position_stats()` | Statistics per position |
 
@@ -489,3 +678,13 @@ print(f"Final dataset: {data}")
 |--------|-------------|
 | `plot_violin()` | Violin plot with dot overlay |
 | `plot_violin_multi()` | Multiple violin plots in grid |
+| `plot_reactivity()` | Coverage + reactivity profiles by cluster |
+
+### Metabin / Metacell Functions
+
+| Method | Description |
+|--------|-------------|
+| `create_metacells()` | Group cells sharing a metadata column value into metacells |
+| `create_metabins()` | Group spatial bins per cluster via balanced bisection |
+| `create_metabins_from_dict()` | Aggregate bins from an explicit `name -> [bin_ids]` dict |
+| `create_metabins_from_mapping()` | Reuse a reference metabin grouping on a target sample |
