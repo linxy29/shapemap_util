@@ -98,8 +98,10 @@ def count_reads_per_cell_gene(bam_file, output_tsv, cb_tag="CB", gene_tag="XT",
     if verbose:
         print("\nConverting to matrix...")
     
-    df = pd.DataFrame(counts).fillna(0).astype(int)
-    
+    # counts[gene][cell_bc]: pd.DataFrame maps outer keys (genes) to columns and
+    # inner keys (cells) to rows, so transpose to get genes as rows, cells as columns.
+    df = pd.DataFrame(counts).fillna(0).astype(int).T
+
     # Sort genes alphabetically and cells alphabetically
     df = df.sort_index()  # Sort gene names (rows)
     df = df[sorted(df.columns)]  # Sort cell barcodes (columns)
