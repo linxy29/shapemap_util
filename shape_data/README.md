@@ -566,6 +566,25 @@ axes = data.plot_reactivity(
 )
 ```
 
+### Per-cell Reactivity Distribution
+
+One KDE subplot per cell, showing the distribution of that cell's reactivity values
+across positions (NaN dropped). Each curve can be colored by a cell metadata column.
+Requires `data.reactivity` to exist (call `calculate_reactivity` first).
+
+```python
+# One KDE per cell, colored by RBP
+axes = data.plot_reactivity_distribution(color_by='RBP', ncols=4)
+
+# Restrict to a gene and a subset of cells
+axes = data.plot_reactivity_distribution(
+    color_by='RBP',
+    gene='18S',
+    cells=['EWSR1', 'HNRNPA1'],
+    use_normalized=False,         # raw reactivity by default
+)
+```
+
 ## Complete Workflow Example
 
 ```python
@@ -679,6 +698,7 @@ print(f"Final dataset: {data}")
 | `plot_violin()` | Violin plot with dot overlay |
 | `plot_violin_multi()` | Multiple violin plots in grid |
 | `plot_reactivity()` | Coverage + reactivity profiles by cluster |
+| `plot_reactivity_distribution()` | Per-cell reactivity KDE grid, colored by metadata |
 
 ### Metabin / Metacell Functions
 

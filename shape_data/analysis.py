@@ -581,17 +581,18 @@ def calculate_reactivity_from_control(
 def calculate_cell_correlation(
     data: 'ShapeData',
     gene: str,
-    cluster_column: str = 'leiden',
+    cluster_column: Optional[str] = None,
     method: str = 'pearson',
     min_shared_positions: int = 100,
     save_mean_as: Optional[str] = None,
     verbose: bool = True
 ) -> pd.DataFrame:
     """
-    Calculate pairwise correlation between cells within the same cluster for a given gene.
+    Calculate pairwise correlation between cells for a given gene.
 
-    For each pair of cells in the same cluster, computes correlation of their
-    reactivity values across all positions of the specified gene.
+    When ``cluster_column`` is provided, correlations are computed only between
+    cells that share the same cluster. When ``cluster_column`` is ``None``,
+    correlations are computed across all pairs of cells.
 
     Parameters:
     -----------
@@ -599,8 +600,9 @@ def calculate_cell_correlation(
         The ShapeData object to analyze
     gene : str
         Gene name to calculate correlations for
-    cluster_column : str
-        Column name in cells DataFrame containing cluster assignments (default: 'leiden')
+    cluster_column : str or None
+        Column name in cells DataFrame containing cluster assignments. If None,
+        correlations are computed across all pairs of cells (default: None).
     method : str
         Correlation method: 'pearson', 'spearman', or 'kendall' (default: 'pearson')
     min_shared_positions : int
@@ -618,7 +620,7 @@ def calculate_cell_correlation(
         Correlation dataframe with columns:
         - cell1: first cell barcode
         - cell2: second cell barcode
-        - cluster: cluster name
+        - cluster: cluster name (or 'all' when cluster_column is None)
         - correlation: pairwise correlation value
         - n_shared: number of shared non-NaN positions
 
@@ -627,15 +629,18 @@ def calculate_cell_correlation(
     ValueError
         If reactivity matrix not found (call calculate_reactivity first)
         If gene not found in genepos
-        If cells is not a DataFrame
+        If cluster_column is provided but cells is not a DataFrame or column missing
 
     Example:
     --------
-    >>> # Calculate correlations for 18S gene
+    >>> # Calculate correlations for 18S gene within clusters
     >>> corr_df = calculate_cell_correlation(data, '18S', cluster_column='leiden')
     >>> print(corr_df.head())
     >>> # Mean correlation is saved to data.cells['mean_corr_18S']
     >>> print(data.cells[['leiden', 'mean_corr_18S']].head())
+    >>>
+    >>> # Calculate correlations across all cell pairs (no cluster grouping)
+    >>> corr_df = calculate_cell_correlation(data, '18S')
     """
     from itertools import combinations
 
@@ -645,16 +650,17 @@ def calculate_cell_correlation(
             "Reactivity matrix not found. Call calculate_reactivity() first."
         )
 
-    if not data.cells_is_df:
-        raise ValueError(
-            "cells must be a DataFrame with cluster assignments."
-        )
+    if cluster_column is not None:
+        if not data.cells_is_df:
+            raise ValueError(
+                "cells must be a DataFrame when cluster_column is specified."
+            )
 
-    if cluster_column not in data.cells.columns:
-        raise ValueError(
-            f"Column '{cluster_column}' not found in cells DataFrame. "
-            f"Available columns: {list(data.cells.columns)}"
-        )
+        if cluster_column not in data.cells.columns:
+            raise ValueError(
+                f"Column '{cluster_column}' not found in cells DataFrame. "
+                f"Available columns: {list(data.cells.columns)}"
+            )
 
     if not isinstance(data.genepos, pd.DataFrame):
         raise ValueError("genepos must be a DataFrame with 'gene' column.")
@@ -679,23 +685,30 @@ def calculate_cell_correlation(
     # Extract reactivity submatrix for this gene (positions x cells)
     gene_reactivity = data.reactivity[gene_positions, :]
 
-    # Get cell names and cluster assignments
+    # Get cell names and build cluster -> cell-indices mapping
     cell_names = data.cell_names
-    clusters = data.cells[cluster_column].dropna().unique()
 
-    if verbose:
-        print(f"Clusters: {list(clusters)}")
+    if cluster_column is None:
+        # Treat all cells as one group
+        cluster_groups = [('all', np.arange(len(cell_names)))]
+        if verbose:
+            print("No cluster_column specified: computing correlations across all cell pairs")
+    else:
+        clusters = data.cells[cluster_column].dropna().unique()
+        cluster_groups = [
+            (cluster, np.where(data.cells[cluster_column] == cluster)[0])
+            for cluster in clusters
+        ]
+        if verbose:
+            print(f"Clusters: {list(clusters)}")
 
     # Store correlation results
     corr_results = []
 
-    for cluster in clusters:
+    for cluster, cluster_cell_indices in cluster_groups:
         if verbose:
             print(f"\nProcessing cluster: {cluster}")
 
-        # Get cell indices for this cluster
-        cluster_mask = data.cells[cluster_column] == cluster
-        cluster_cell_indices = np.where(cluster_mask)[0]
         cluster_cell_names = [cell_names[i] for i in cluster_cell_indices]
         n_cells = len(cluster_cell_indices)
 
@@ -784,12 +797,16 @@ def calculate_cell_correlation(
             cell_mean_corr[cell] = np.nan
 
     # Add to cells metadata
-    data.cells[save_mean_as] = data.cells.index.map(cell_mean_corr)
+    if data.cells_is_df:
+        data.cells[save_mean_as] = data.cells.index.map(cell_mean_corr)
 
-    if verbose:
-        print(f"\nMean correlation saved to cells['{save_mean_as}']")
-        valid_means = data.cells[save_mean_as].dropna()
-        print(f"Cells with valid mean correlation: {len(valid_means)} / {len(data.cells)}")
+        if verbose:
+            print(f"\nMean correlation saved to cells['{save_mean_as}']")
+            valid_means = data.cells[save_mean_as].dropna()
+            print(f"Cells with valid mean correlation: {len(valid_means)} / {len(data.cells)}")
+    else:
+        if verbose:
+            print(f"\ncells is not a DataFrame; skipped saving mean correlation as '{save_mean_as}'")
 
     return corr_df
 

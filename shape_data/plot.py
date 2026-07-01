@@ -514,6 +514,7 @@ def plot_reactivity(
     use_normalized: bool = True,
     ax: Optional[Any] = None,
     smoothing: int = 1,
+    log_coverage: bool = False,
 ) -> Any:
     """
     Plot coverage and reactivity profiles across positions, grouped by cluster.
@@ -558,6 +559,10 @@ def plot_reactivity(
         no smoothing). When smoothing=3, each position's coverage and reactivity
         become the mean of itself and its two neighbors. Edge positions use
         reflect mode.
+    log_coverage : bool
+        If True, plot the coverage subplot on a logarithmic y-axis (default:
+        False). Zero/non-positive coverage positions are already shown as gaps,
+        so they are simply omitted from the log-scaled axis.
 
     Returns:
     --------
@@ -720,6 +725,15 @@ def plot_reactivity(
         else:
             raise ValueError(f"spread must be 'std', 'se', 'ci95', or 'iqr', got '{spread}'")
 
+        # Skip zero-coverage positions: NaN breaks the line/fill so they appear as gaps
+        zero_cov = cov_mean == 0
+        cov_mean = cov_mean.astype(float).copy()
+        cov_lo = np.asarray(cov_lo, dtype=float).copy()
+        cov_hi = np.asarray(cov_hi, dtype=float).copy()
+        cov_mean[zero_cov] = np.nan
+        cov_lo[zero_cov] = np.nan
+        cov_hi[zero_cov] = np.nan
+
         label = f"{cluster} (n={n_cells})"
         color = colors[ci]
 
@@ -741,9 +755,13 @@ def plot_reactivity(
             ax_react.errorbar(x_positions, react_mean, yerr=[react_mean - react_lo, react_hi - react_mean],
                               color=color, alpha=line_alpha, capsize=2, fmt='none')
 
-    ax_cov.set_ylabel('Coverage')
+    if log_coverage:
+        ax_cov.set_yscale('log')
+        ax_cov.set_ylabel('Coverage (log scale)')
+    else:
+        ax_cov.set_ylabel('Coverage')
     ax_cov.legend(title=cluster_col, fontsize='small')
-    ax_react.set_ylabel('Reactivity')
+    ax_react.set_ylabel('Normalized reactivity' if use_normalized else 'Reactivity')
     ax_react.set_xlabel('Position')
     ax_react.legend(title=cluster_col, fontsize='small')
 
@@ -754,3 +772,433 @@ def plot_reactivity(
 
     plt.tight_layout()
     return axes
+
+
+def plot_reactivity_distribution(
+    data: 'ShapeData',
+    color_by: Optional[str] = None,
+    use_normalized: bool = False,
+    cells: Optional[List[str]] = None,
+    gene: Optional[str] = None,
+    pos_range: Optional[Tuple[int, int]] = None,
+    ncols: int = 4,
+    figsize: Optional[Tuple[int, int]] = None,
+    palette: Optional[str] = 'Set2',
+    fill: bool = True,
+    sharex: bool = True,
+    title: Optional[str] = None,
+    **kwargs
+) -> Any:
+    """
+    Plot the distribution of reactivity values for each cell as a grid of KDE plots.
+
+    Creates one subplot per cell, each showing a kernel density estimate of that
+    cell's reactivity values across positions (NaN values are dropped). When
+    ``color_by`` is given, each cell's curve is colored by the cell's value in that
+    metadata column, with a shared figure legend.
+
+    Parameters:
+    -----------
+    data : ShapeData
+        The ShapeData object to plot from. Must have a reactivity matrix
+        (call calculate_reactivity() first if needed).
+    color_by : str, optional
+        Column name in cells metadata used to color each cell's KDE. If None,
+        all curves use a single default color.
+    use_normalized : bool
+        If True, use normalized_reactivity; otherwise use raw reactivity
+        (default: False).
+    cells : list of str, optional
+        Specific cell names to plot. If None, plots all cells.
+    gene : str, optional
+        Gene name to filter positions. Only used when genepos is a DataFrame
+        with a 'gene' column.
+    pos_range : tuple of (int, int), optional
+        (start, end) position filter (inclusive). Uses genepos 'pos' values when
+        available, otherwise row-index slicing. Overridden by ``gene`` where both apply.
+    ncols : int
+        Number of columns in the subplot grid (default: 4).
+    figsize : tuple, optional
+        Figure size (width, height). If None, auto-calculated as (4*ncols, 3*nrows).
+    palette : str, optional
+        Color palette name used to map ``color_by`` groups to colors (default: 'Set2').
+    fill : bool
+        Whether to fill the area under each KDE curve (default: True).
+    sharex : bool
+        Whether subplots share the same x-axis (default: True).
+    title : str, optional
+        Overall figure title.
+    **kwargs
+        Additional arguments passed to seaborn.kdeplot.
+
+    Returns:
+    --------
+    numpy.ndarray of matplotlib.axes.Axes
+        Array of the axes objects used (one per plotted cell).
+
+    Example:
+    --------
+    >>> # One KDE per cell, colored by RBP
+    >>> data.plot_reactivity_distribution(color_by='RBP')
+    >>>
+    >>> # Restrict to a gene and a subset of cells
+    >>> data.plot_reactivity_distribution(color_by='RBP', gene='18S',
+    ...                                   cells=['EWSR1', 'HNRNPA1'])
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    try:
+        import seaborn as sns
+    except ImportError:
+        raise ImportError("seaborn is required for plot_reactivity_distribution. "
+                          "Install with: pip install seaborn")
+
+    # Select reactivity matrix
+    if use_normalized:
+        if data.normalized_reactivity is None:
+            raise ValueError("normalized_reactivity is None. Call calculate_reactivity() "
+                             "with normalize=True first.")
+        reactivity_matrix = data.normalized_reactivity
+        value_label = 'Normalized reactivity'
+    else:
+        if data.reactivity is None:
+            raise ValueError("reactivity matrix is None. Call calculate_reactivity() first.")
+        reactivity_matrix = data.reactivity
+        value_label = 'Reactivity'
+
+    # Determine position mask (same logic as plot_reactivity)
+    n_pos = reactivity_matrix.shape[0]
+    pos_mask = np.ones(n_pos, dtype=bool)
+
+    if gene is not None and isinstance(data.genepos, pd.DataFrame) and 'gene' in data.genepos.columns:
+        pos_mask &= data.genepos['gene'].values == gene
+
+    if pos_range is not None and isinstance(data.genepos, pd.DataFrame) and 'pos' in data.genepos.columns:
+        pos_vals = data.genepos['pos'].values
+        start, end = pos_range
+        pos_mask &= (pos_vals >= start) & (pos_vals <= end)
+    elif pos_range is not None:
+        start, end = pos_range
+        idx_mask = np.zeros(n_pos, dtype=bool)
+        idx_mask[start:min(end + 1, n_pos)] = True
+        pos_mask &= idx_mask
+
+    pos_indices = np.where(pos_mask)[0]
+    if len(pos_indices) == 0:
+        raise ValueError("No positions selected")
+
+    react_sub = np.asarray(reactivity_matrix[pos_indices, :], dtype=float)
+
+    # Resolve cell column indices
+    cell_names = data.cell_names
+    if cells is None:
+        cell_indices = list(range(len(cell_names)))
+    else:
+        name_to_idx = {name: i for i, name in enumerate(cell_names)}
+        missing = [c for c in cells if c not in name_to_idx]
+        if missing:
+            raise ValueError(f"Cells not found: {missing}")
+        cell_indices = [name_to_idx[c] for c in cells]
+
+    if len(cell_indices) == 0:
+        raise ValueError("No cells selected")
+
+    # Build color mapping from color_by metadata column
+    cell_colors = None
+    group_color = None
+    if color_by is not None:
+        if not data.cells_is_df:
+            raise ValueError("cells must be a DataFrame to use color_by")
+        if color_by not in data.cells.columns:
+            raise ValueError(f"color_by column '{color_by}' not found in cells. "
+                             f"Available: {list(data.cells.columns)}")
+        group_values = data.cells[color_by].values
+        unique_groups = list(pd.unique(group_values))
+        colors = sns.color_palette(palette, n_colors=len(unique_groups))
+        group_color = {g: colors[i] for i, g in enumerate(unique_groups)}
+        cell_colors = {idx: group_color[group_values[idx]] for idx in cell_indices}
+
+    # Grid layout
+    n_plots = len(cell_indices)
+    nrows = (n_plots + ncols - 1) // ncols
+    if figsize is None:
+        figsize = (4 * ncols, 3 * nrows)
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False, sharex=sharex)
+    axes = axes.flatten()
+
+    for i, col in enumerate(cell_indices):
+        ax = axes[i]
+        values = react_sub[:, col]
+        values = values[np.isfinite(values)]
+
+        color = cell_colors[col] if cell_colors is not None else 'steelblue'
+
+        cell_name = cell_names[col]
+        if color_by is not None:
+            subtitle = f"{cell_name} ({data.cells[color_by].values[col]})"
+        else:
+            subtitle = str(cell_name)
+
+        # KDE needs at least 2 distinct finite values
+        if values.size < 2 or np.unique(values).size < 2:
+            ax.text(0.5, 0.5, 'insufficient data', ha='center', va='center',
+                    transform=ax.transAxes, fontsize='small', color='gray')
+        else:
+            sns.kdeplot(x=values, ax=ax, color=color, fill=fill, **kwargs)
+
+        ax.set_title(subtitle, fontsize='small')
+        ax.set_xlabel(value_label)
+
+    # Hide unused subplots
+    for i in range(n_plots, len(axes)):
+        axes[i].set_visible(False)
+
+    # Shared legend for color groups
+    if color_by is not None and group_color is not None:
+        handles = [mpatches.Patch(color=c, label=str(g)) for g, c in group_color.items()]
+        fig.legend(handles=handles, title=color_by, loc='center left',
+                   bbox_to_anchor=(1.0, 0.5), fontsize='small')
+
+    if title:
+        fig.suptitle(title, y=1.02)
+
+    plt.tight_layout()
+    return axes[:n_plots]
+
+
+def plot_mutrate_distribution(
+    data: 'ShapeData',
+    control_cols: Optional[List[str]] = None,
+    control_prefix: str = 'mean_mutrate_control_',
+    color_by: Optional[str] = None,
+    cells: Optional[List[str]] = None,
+    gene: Optional[str] = None,
+    pos_range: Optional[Tuple[int, int]] = None,
+    ncols: int = 4,
+    figsize: Optional[Tuple[int, int]] = None,
+    palette: Optional[str] = 'Set2',
+    fill: bool = True,
+    sharex: bool = True,
+    title: Optional[str] = None,
+    **kwargs
+) -> Any:
+    """
+    Plot the distribution of mutation rate for each cell as a grid of KDE plots.
+
+    Creates one subplot per cell. Each subplot overlays:
+    - the KDE of that cell's raw mutation rate (``data.mutrate``) across positions,
+      using only positions where the cell's coverage > 0 (zero-coverage positions
+      are dropped); and
+    - one KDE per control mutation-rate vector stored as a column in ``data.genepos``
+      (per-position control profiles, e.g. added via ``add_control_data``). The same
+      control curves appear in every subplot as a shared baseline.
+
+    Parameters:
+    -----------
+    data : ShapeData
+        The ShapeData object to plot from. Must have a mutrate matrix.
+    control_cols : list of str, optional
+        Names of control columns in ``data.genepos`` to overlay. If None, all genepos
+        columns whose names start with ``control_prefix`` are used.
+    control_prefix : str
+        Prefix used to auto-discover control columns when ``control_cols`` is None
+        (default: 'mean_mutrate_control_').
+    color_by : str, optional
+        Column in cells metadata used to color each cell's mutrate KDE. If None, a
+        single default color is used.
+    cells : list of str, optional
+        Specific cell names to plot. If None, plots all cells.
+    gene : str, optional
+        Gene name to filter positions (requires genepos DataFrame with 'gene' column).
+    pos_range : tuple of (int, int), optional
+        (start, end) position filter (inclusive). Uses genepos 'pos' values when
+        available, otherwise row-index slicing. Overridden by ``gene`` where both apply.
+    ncols : int
+        Number of columns in the subplot grid (default: 4).
+    figsize : tuple, optional
+        Figure size. If None, auto-calculated as (4*ncols, 3*nrows).
+    palette : str, optional
+        Color palette name used to map ``color_by`` groups to colors (default: 'Set2').
+    fill : bool
+        Whether to fill the area under each cell's mutrate KDE (default: True). Control
+        curves are always drawn unfilled (dashed) for comparison.
+    sharex : bool
+        Whether subplots share the same x-axis (default: True).
+    title : str, optional
+        Overall figure title.
+    **kwargs
+        Additional arguments passed to seaborn.kdeplot for the cell mutrate curve.
+
+    Returns:
+    --------
+    numpy.ndarray of matplotlib.axes.Axes
+        Array of the axes objects used (one per plotted cell).
+
+    Example:
+    --------
+    >>> # One mutrate KDE per cell, plus every mean_mutrate_control_* baseline
+    >>> data.plot_mutrate_distribution()
+    >>>
+    >>> # Restrict to a gene and a single control column, colored by RBP
+    >>> data.plot_mutrate_distribution(control_cols=['mean_mutrate_control_rbp'],
+    ...                                gene='18S', color_by='RBP')
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    import matplotlib.lines as mlines
+    from scipy import sparse
+    try:
+        import seaborn as sns
+    except ImportError:
+        raise ImportError("seaborn is required for plot_mutrate_distribution. "
+                          "Install with: pip install seaborn")
+
+    if data.mutrate is None:
+        raise ValueError("mutrate matrix is None. ShapeData must be created with a "
+                         "mutrate matrix.")
+
+    # Determine position mask (same logic as plot_reactivity_distribution)
+    n_pos = data.mutrate.shape[0]
+    pos_mask = np.ones(n_pos, dtype=bool)
+
+    if gene is not None and isinstance(data.genepos, pd.DataFrame) and 'gene' in data.genepos.columns:
+        pos_mask &= data.genepos['gene'].values == gene
+
+    if pos_range is not None and isinstance(data.genepos, pd.DataFrame) and 'pos' in data.genepos.columns:
+        pos_vals = data.genepos['pos'].values
+        start, end = pos_range
+        pos_mask &= (pos_vals >= start) & (pos_vals <= end)
+    elif pos_range is not None:
+        start, end = pos_range
+        idx_mask = np.zeros(n_pos, dtype=bool)
+        idx_mask[start:min(end + 1, n_pos)] = True
+        pos_mask &= idx_mask
+
+    pos_indices = np.where(pos_mask)[0]
+    if len(pos_indices) == 0:
+        raise ValueError("No positions selected")
+
+    # Slice mutrate and coverage to selected positions (keep sparse, densify per-column)
+    mut_sub = data.mutrate[pos_indices, :]
+    cov_sub = data.coverage[pos_indices, :]
+
+    # Resolve control columns from genepos
+    if not isinstance(data.genepos, pd.DataFrame):
+        raise ValueError("genepos must be a DataFrame to plot control columns")
+    if control_cols is None:
+        control_cols = [c for c in data.genepos.columns if c.startswith(control_prefix)]
+    else:
+        missing = [c for c in control_cols if c not in data.genepos.columns]
+        if missing:
+            available = [c for c in data.genepos.columns if c.startswith(control_prefix)]
+            raise ValueError(f"Control columns not found in genepos: {missing}. "
+                             f"Available control columns: {available}")
+
+    # Extract each control as a finite-filtered per-position vector + assign a color
+    control_curves = []  # list of (name, values, color)
+    control_palette = sns.color_palette('dark', n_colors=max(len(control_cols), 1))
+    for ci, ccol in enumerate(control_cols):
+        cvals = np.asarray(data.genepos[ccol].values, dtype=float)[pos_indices]
+        cvals = cvals[np.isfinite(cvals)]
+        control_curves.append((ccol, cvals, control_palette[ci]))
+
+    # Resolve cell column indices
+    cell_names = data.cell_names
+    if cells is None:
+        cell_indices = list(range(len(cell_names)))
+    else:
+        name_to_idx = {name: i for i, name in enumerate(cell_names)}
+        missing = [c for c in cells if c not in name_to_idx]
+        if missing:
+            raise ValueError(f"Cells not found: {missing}")
+        cell_indices = [name_to_idx[c] for c in cells]
+
+    if len(cell_indices) == 0:
+        raise ValueError("No cells selected")
+
+    # Build color mapping from color_by metadata column
+    cell_colors = None
+    group_color = None
+    if color_by is not None:
+        if not data.cells_is_df:
+            raise ValueError("cells must be a DataFrame to use color_by")
+        if color_by not in data.cells.columns:
+            raise ValueError(f"color_by column '{color_by}' not found in cells. "
+                             f"Available: {list(data.cells.columns)}")
+        group_values = data.cells[color_by].values
+        unique_groups = list(pd.unique(group_values))
+        colors = sns.color_palette(palette, n_colors=len(unique_groups))
+        group_color = {g: colors[i] for i, g in enumerate(unique_groups)}
+        cell_colors = {idx: group_color[group_values[idx]] for idx in cell_indices}
+
+    # Grid layout
+    n_plots = len(cell_indices)
+    nrows = (n_plots + ncols - 1) // ncols
+    if figsize is None:
+        figsize = (4 * ncols, 3 * nrows)
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False, sharex=sharex)
+    axes = axes.flatten()
+
+    for i, col in enumerate(cell_indices):
+        ax = axes[i]
+
+        mut_col = mut_sub[:, col]
+        cov_col = cov_sub[:, col]
+        mut_vals = mut_col.toarray().ravel() if sparse.issparse(mut_col) else np.asarray(mut_col).ravel()
+        cov_vals = cov_col.toarray().ravel() if sparse.issparse(cov_col) else np.asarray(cov_col).ravel()
+
+        # Only positions with coverage > 0 and finite mutrate
+        values = mut_vals[(cov_vals > 0) & np.isfinite(mut_vals)]
+
+        color = cell_colors[col] if cell_colors is not None else 'steelblue'
+
+        cell_name = cell_names[col]
+        if color_by is not None:
+            subtitle = f"{cell_name} ({data.cells[color_by].values[col]})"
+        else:
+            subtitle = str(cell_name)
+
+        # KDE needs at least 2 distinct finite values
+        if values.size < 2 or np.unique(values).size < 2:
+            ax.text(0.5, 0.5, 'insufficient data', ha='center', va='center',
+                    transform=ax.transAxes, fontsize='small', color='gray')
+        else:
+            sns.kdeplot(x=values, ax=ax, color=color, fill=fill, **kwargs)
+
+        # Overlay control distributions (shared baseline, dashed, unfilled)
+        for ccol, cvals, ccolor in control_curves:
+            if cvals.size >= 2 and np.unique(cvals).size >= 2:
+                sns.kdeplot(x=cvals, ax=ax, color=ccolor, fill=False,
+                            linestyle='--', label=ccol)
+
+        ax.set_title(subtitle, fontsize='small')
+        ax.set_xlabel('Mutation rate')
+        ax.set_xlim(-0.01, 0.07)
+        # Suppress per-axes legend; a shared figure legend is built below
+        legend = ax.get_legend()
+        if legend is not None:
+            legend.remove()
+
+    # Hide unused subplots
+    for i in range(n_plots, len(axes)):
+        axes[i].set_visible(False)
+
+    # Shared legend: color_by groups (if any) + control curves
+    handles = []
+    if color_by is not None and group_color is not None:
+        handles.extend([mpatches.Patch(color=c, label=str(g))
+                        for g, c in group_color.items()])
+    handles.extend([mlines.Line2D([], [], color=ccolor, linestyle='--', label=ccol)
+                    for ccol, _, ccolor in control_curves])
+    if handles:
+        legend_title = color_by if color_by is not None else None
+        fig.legend(handles=handles, title=legend_title, loc='center left',
+                   bbox_to_anchor=(1.0, 0.5), fontsize='small')
+
+    if title:
+        fig.suptitle(title, y=1.02)
+
+    plt.tight_layout()
+    return axes[:n_plots]

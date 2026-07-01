@@ -36,7 +36,9 @@ from .metadata import (
 from .plot import (
     plot_violin as _plot_violin,
     plot_violin_multi as _plot_violin_multi,
-    plot_reactivity as _plot_reactivity
+    plot_reactivity as _plot_reactivity,
+    plot_reactivity_distribution as _plot_reactivity_distribution,
+    plot_mutrate_distribution as _plot_mutrate_distribution
 )
 from .metabin import (
     create_metabins as _create_metabins,
@@ -733,21 +735,26 @@ class ShapeData:
     def calculate_cell_correlation(
         self,
         gene: str,
-        cluster_column: str = 'leiden',
+        cluster_column: Optional[str] = None,
         method: str = 'pearson',
         min_shared_positions: int = 100,
         save_mean_as: Optional[str] = None,
         verbose: bool = True
     ) -> pd.DataFrame:
         """
-        Calculate pairwise correlation between cells within the same cluster.
+        Calculate pairwise correlation between cells.
+
+        When ``cluster_column`` is provided, correlations are computed only
+        between cells that share the same cluster. When ``cluster_column`` is
+        ``None`` (default), correlations are computed across all pairs of cells.
 
         Parameters:
         -----------
         gene : str
             Gene name to calculate correlations for
-        cluster_column : str
-            Column name in cells DataFrame containing cluster assignments
+        cluster_column : str or None
+            Column name in cells DataFrame containing cluster assignments.
+            If None, correlations are computed across all pairs of cells.
         method : str
             Correlation method: 'pearson', 'spearman', or 'kendall'
         min_shared_positions : int
@@ -1144,6 +1151,7 @@ class ShapeData:
         use_normalized: bool = True,
         ax: Optional[Any] = None,
         smoothing: int = 1,
+        log_coverage: bool = False,
     ) -> Any:
         """
         Plot coverage and reactivity profiles across positions, grouped by cluster.
@@ -1181,6 +1189,8 @@ class ShapeData:
         smoothing : int
             Window size for sliding-window smoothing along positions (default: 1,
             no smoothing). Edge positions use reflect mode.
+        log_coverage : bool
+            If True, plot the coverage subplot on a logarithmic y-axis (default: False).
 
         Returns:
         --------
@@ -1189,7 +1199,133 @@ class ShapeData:
         return _plot_reactivity(
             self, pos_range, gene, cluster_col, clusters, title, figsize,
             palette, line_alpha, fill_alpha, variance_style, spread, use_normalized, ax,
-            smoothing
+            smoothing, log_coverage
+        )
+
+    def plot_reactivity_distribution(
+        self,
+        color_by: Optional[str] = None,
+        use_normalized: bool = False,
+        cells: Optional[List[str]] = None,
+        gene: Optional[str] = None,
+        pos_range: Optional[Tuple[int, int]] = None,
+        ncols: int = 4,
+        figsize: Optional[Tuple[int, int]] = None,
+        palette: Optional[str] = 'Set2',
+        fill: bool = True,
+        sharex: bool = True,
+        title: Optional[str] = None,
+        **kwargs
+    ) -> Any:
+        """
+        Plot the distribution of reactivity values for each cell as a grid of KDE plots.
+
+        Creates one subplot per cell, each a kernel density estimate of that cell's
+        reactivity values across positions (NaN dropped). When ``color_by`` is given,
+        each cell's curve is colored by its value in that metadata column, with a
+        shared figure legend.
+
+        Parameters:
+        -----------
+        color_by : str, optional
+            Column in cells metadata used to color each cell's KDE. If None, a single
+            default color is used.
+        use_normalized : bool
+            If True, use normalized_reactivity; otherwise use raw reactivity (default: False).
+        cells : list of str, optional
+            Specific cell names to plot. If None, plots all cells.
+        gene : str, optional
+            Gene name to filter positions (requires genepos DataFrame with 'gene' column).
+        pos_range : tuple of (int, int), optional
+            (start, end) position filter (inclusive).
+        ncols : int
+            Number of columns in the subplot grid (default: 4).
+        figsize : tuple, optional
+            Figure size. If None, auto-calculated.
+        palette : str, optional
+            Color palette name for ``color_by`` groups (default: 'Set2').
+        fill : bool
+            Whether to fill under each KDE curve (default: True).
+        sharex : bool
+            Whether subplots share the same x-axis (default: True).
+        title : str, optional
+            Overall figure title.
+        **kwargs
+            Additional arguments passed to seaborn.kdeplot.
+
+        Returns:
+        --------
+        numpy.ndarray of matplotlib.axes.Axes
+            Array of the axes objects used (one per plotted cell).
+        """
+        return _plot_reactivity_distribution(
+            self, color_by, use_normalized, cells, gene, pos_range, ncols,
+            figsize, palette, fill, sharex, title, **kwargs
+        )
+
+    def plot_mutrate_distribution(
+        self,
+        control_cols: Optional[List[str]] = None,
+        control_prefix: str = 'mean_mutrate_control_',
+        color_by: Optional[str] = None,
+        cells: Optional[List[str]] = None,
+        gene: Optional[str] = None,
+        pos_range: Optional[Tuple[int, int]] = None,
+        ncols: int = 4,
+        figsize: Optional[Tuple[int, int]] = None,
+        palette: Optional[str] = 'Set2',
+        fill: bool = True,
+        sharex: bool = True,
+        title: Optional[str] = None,
+        **kwargs
+    ) -> Any:
+        """
+        Plot the distribution of mutation rate for each cell as a grid of KDE plots.
+
+        Creates one subplot per cell. Each subplot overlays the cell's raw mutation
+        rate KDE (using only positions where that cell's coverage > 0) with one KDE
+        per control mutation-rate column from ``genepos`` (a shared baseline that
+        repeats in every subplot).
+
+        Parameters:
+        -----------
+        control_cols : list of str, optional
+            Control columns in ``genepos`` to overlay. If None, all genepos columns
+            starting with ``control_prefix`` are used.
+        control_prefix : str
+            Prefix for auto-discovering control columns (default: 'mean_mutrate_control_').
+        color_by : str, optional
+            Column in cells metadata used to color each cell's mutrate KDE.
+        cells : list of str, optional
+            Specific cell names to plot. If None, plots all cells.
+        gene : str, optional
+            Gene name to filter positions (requires genepos DataFrame with 'gene' column).
+        pos_range : tuple of (int, int), optional
+            (start, end) position filter (inclusive).
+        ncols : int
+            Number of columns in the subplot grid (default: 4).
+        figsize : tuple, optional
+            Figure size. If None, auto-calculated.
+        palette : str, optional
+            Color palette name for ``color_by`` groups (default: 'Set2').
+        fill : bool
+            Whether to fill under each cell's mutrate KDE (default: True). Control
+            curves are drawn unfilled (dashed).
+        sharex : bool
+            Whether subplots share the same x-axis (default: True).
+        title : str, optional
+            Overall figure title.
+        **kwargs
+            Additional arguments passed to seaborn.kdeplot for the cell mutrate curve.
+
+        Returns:
+        --------
+        numpy.ndarray of matplotlib.axes.Axes
+            Array of the axes objects used (one per plotted cell).
+        """
+        return _plot_mutrate_distribution(
+            self, control_cols, control_prefix, color_by, cells, gene, pos_range,
+            ncols, figsize, palette, fill, sharex, title, **kwargs
         )
 
     # =========================================================================
