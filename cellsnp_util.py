@@ -160,12 +160,106 @@ def read_cellsnp_vcf_to_matrices(vcf_gz_file, chunk_size=100000, progress_interv
 
     return coverage_df, mutrate_df
 
-def read_cellsnp_vcf_to_matrices_pysam_sparse(vcf_gz_file, progress_interval=100000, target_genes=None, include_mutant_counts=False):
+def _chunk_list(items, n_chunks):
+    """Split a list into at most n_chunks contiguous sublists, preserving order."""
+    n = len(items)
+    n_chunks = max(1, min(n_chunks, n))
+    k, r = divmod(n, n_chunks)
+    chunks = []
+    start = 0
+    for i in range(n_chunks):
+        size = k + (1 if i < r else 0)
+        chunks.append(items[start:start + size])
+        start += size
+    return chunks
+
+
+def _parse_gene_chunk_worker(task):
+    """
+    Worker for the n_jobs>1 path of read_cellsnp_vcf_to_matrices_pysam_sparse.
+
+    Parses one chunk of genes via indexed vcf.fetch() and returns local sparse
+    triplets. Row indices are 0-based within the chunk; the parent applies a row
+    offset when merging. Must stay a module-level function so it is picklable for
+    multiprocessing.
+    """
+    vcf_gz_file, gene_list, col_names, include_mutant_counts = task
+    import pysam
+
+    vcf = pysam.VariantFile(vcf_gz_file)
+    cell_iter = list(enumerate(col_names))
+
+    genes, positions, refs = [], [], []
+    cov_data, cov_rows, cov_cols = [], [], []
+    mut_data, mut_rows, mut_cols = [], [], []
+    ad_data, ad_rows, ad_cols = [], [], []
+    missing = []
+
+    row_idx = 0
+    for gene_name in gene_list:
+        try:
+            records = vcf.fetch(contig=gene_name)
+        except ValueError:
+            missing.append(gene_name)
+            continue
+        for record in records:
+            genes.append(record.chrom)
+            positions.append(record.pos)
+            refs.append(record.ref)
+
+            for cell_idx, sample_name in cell_iter:
+                sample = record.samples[sample_name]
+                dp_val = sample.get('DP')
+                ad_val = sample.get('AD')
+                all_vals = sample.get('ALL')
+
+                if dp_val is None or all_vals is None:
+                    continue
+
+                try:
+                    if isinstance(all_vals, (list, tuple)) and len(all_vals) >= 4:
+                        cov = sum(all_vals[:4])
+                        if cov > 0:
+                            ref = dp_val - (ad_val if ad_val else 0)
+                            mutation = cov - ref
+
+                            cov_data.append(cov)
+                            cov_rows.append(row_idx)
+                            cov_cols.append(cell_idx)
+
+                            mut_data.append(mutation / cov)
+                            mut_rows.append(row_idx)
+                            mut_cols.append(cell_idx)
+
+                            if include_mutant_counts:
+                                ad_data.append(mutation)
+                                ad_rows.append(row_idx)
+                                ad_cols.append(cell_idx)
+                except (TypeError, ValueError):
+                    continue
+
+            row_idx += 1
+
+    vcf.close()
+
+    return {
+        'genes': genes, 'positions': positions, 'refs': refs,
+        'cov': (cov_data, cov_rows, cov_cols),
+        'mut': (mut_data, mut_rows, mut_cols),
+        'ad': (ad_data, ad_rows, ad_cols) if include_mutant_counts else None,
+        'n_variants': row_idx,
+        'missing': missing,
+    }
+
+
+def read_cellsnp_vcf_to_matrices_pysam_sparse(vcf_gz_file, progress_interval=100000, target_genes=None, target_cells=None, include_mutant_counts=False, n_jobs=1):
     """
     Memory-efficient reading of cellSNP.cells.vcf.gz using sparse matrices.
 
     This version stores only non-zero values, dramatically reducing memory
     usage for sparse single-cell data (typically >95% memory savings).
+
+    Haven't check n_jobs parameters
 
     Parameters:
     -----------
@@ -178,8 +272,21 @@ def read_cellsnp_vcf_to_matrices_pysam_sparse(vcf_gz_file, progress_interval=100
         Gene names must match the CHROM field in the VCF exactly.
         When the VCF is indexed (.tbi/.csi), uses vcf.fetch() for
         efficient random access instead of scanning the whole file.
+    target_cells : list of str, optional
+        If provided, only load these cells/samples (matched against the VCF
+        header sample names). The output matrices have one column per kept
+        cell, in the order given by target_cells. This skips the per-cell
+        parsing work for unwanted cells (roughly linear speedup), but does
+        not reduce file decompression, since all cells share each VCF line.
     include_mutant_counts : bool, default=False
         If True, also output a sparse matrix of mutant read counts.
+    n_jobs : int, default=1
+        Number of worker processes for parsing. Parallelism only applies to the
+        indexed ``target_genes`` path (requires a .tbi/.csi index): the gene list
+        is split into contiguous chunks and parsed in separate processes, then
+        merged in sorted-gene order so the output is identical to n_jobs=1. Has
+        no effect on the full-scan path (no target_genes) or when the index is
+        unavailable. Set to 1 (default) for the original single-threaded behavior.
 
     Returns:
     --------
@@ -202,9 +309,23 @@ def read_cellsnp_vcf_to_matrices_pysam_sparse(vcf_gz_file, progress_interval=100
     print(f"Reading VCF file (sparse mode): {vcf_gz_file}")
 
     vcf = pysam.VariantFile(vcf_gz_file)
-    samples = list(vcf.header.samples)
-    n_cells = len(samples)
-    print(f"Found {n_cells} cells")
+    all_samples = list(vcf.header.samples)
+    print(f"Found {len(all_samples)} cells")
+
+    # Build the list of (output_col_idx, sample_name) pairs to iterate over.
+    # When target_cells is given, only those cells are parsed and they become
+    # the columns of the output matrices, in the order given by target_cells.
+    if target_cells is not None:
+        all_samples_set = set(all_samples)
+        col_names = [c for c in target_cells if c in all_samples_set]
+        missing = [c for c in target_cells if c not in all_samples_set]
+        if missing:
+            print(f"  Warning: {len(missing)} target cell(s) not found in VCF, skipping")
+        print(f"Filtering for {len(col_names)} target cell(s)")
+    else:
+        col_names = all_samples
+    cell_iter = list(enumerate(col_names))
+    n_cells = len(col_names)
 
     if target_genes is not None:
         target_genes_set = set(target_genes)
@@ -228,7 +349,63 @@ def read_cellsnp_vcf_to_matrices_pysam_sparse(vcf_gz_file, progress_interval=100
             use_fetch = False
             print("  Warning: VCF index not available, falling back to full scan with filtering")
 
-        if use_fetch:
+        if use_fetch and n_jobs and n_jobs > 1:
+            from concurrent.futures import ProcessPoolExecutor, as_completed
+
+            vcf.close()  # workers open their own handles
+            sorted_genes = sorted(target_genes_set)
+            n_workers = min(n_jobs, len(sorted_genes))
+            chunks = _chunk_list(sorted_genes, min(len(sorted_genes), n_workers * 4))
+            print(f"  Using indexed fetch with {n_workers} worker(s) over "
+                  f"{len(chunks)} gene chunk(s)...")
+
+            results = [None] * len(chunks)
+            with ProcessPoolExecutor(max_workers=n_workers) as ex:
+                futures = {
+                    ex.submit(_parse_gene_chunk_worker,
+                              (vcf_gz_file, chunk, col_names, include_mutant_counts)): ci
+                    for ci, chunk in enumerate(chunks)
+                }
+                n_done = 0
+                for fut in as_completed(futures):
+                    results[futures[fut]] = fut.result()
+                    n_done += 1
+                    print(f"  Completed {n_done}/{len(chunks)} chunk(s)...")
+
+            # Merge in chunk-index order so output matches the n_jobs=1 ordering.
+            row_offset = 0
+            all_missing = []
+            for res in results:
+                genes.extend(res['genes'])
+                positions.extend(res['positions'])
+                refs.extend(res['refs'])
+
+                cd, cr, cc = res['cov']
+                cov_data.extend(cd)
+                cov_rows.extend(r + row_offset for r in cr)
+                cov_cols.extend(cc)
+
+                md, mr, mc = res['mut']
+                mut_data.extend(md)
+                mut_rows.extend(r + row_offset for r in mr)
+                mut_cols.extend(mc)
+
+                if include_mutant_counts:
+                    ad_d, ad_r, ad_c = res['ad']
+                    ad_data.extend(ad_d)
+                    ad_rows.extend(r + row_offset for r in ad_r)
+                    ad_cols.extend(ad_c)
+
+                row_offset += res['n_variants']
+                all_missing.extend(res['missing'])
+
+            if all_missing:
+                print(f"  Warning: {len(all_missing)} gene(s) not found in VCF, "
+                      f"skipping: {', '.join(all_missing)}")
+            n_variants = len(genes)
+            print(f"Parsed {n_variants:,} positions (from {len(target_genes_set)} target genes)")
+
+        elif use_fetch:
             row_idx = 0
             n_scanned = 0
             print(f"  Using indexed fetch for {len(target_genes_set)} gene(s)...")
@@ -240,7 +417,7 @@ def read_cellsnp_vcf_to_matrices_pysam_sparse(vcf_gz_file, progress_interval=100
                         positions.append(record.pos)
                         refs.append(record.ref)
 
-                        for cell_idx, sample_name in enumerate(samples):
+                        for cell_idx, sample_name in cell_iter:
                             sample = record.samples[sample_name]
                             dp_val = sample.get('DP')
                             ad_val = sample.get('AD')
@@ -276,8 +453,6 @@ def read_cellsnp_vcf_to_matrices_pysam_sparse(vcf_gz_file, progress_interval=100
 
                         if progress_interval and n_scanned % progress_interval == 0:
                             print(f"  Processed {n_scanned:,} variants...")
-                    gene_count = row_idx - gene_start_idx
-                    print(f"  Loaded gene '{gene_name}': {gene_count:,} variants")
                 except ValueError:
                     print(f"  Warning: gene '{gene_name}' not found in VCF, skipping")
 
@@ -301,7 +476,7 @@ def read_cellsnp_vcf_to_matrices_pysam_sparse(vcf_gz_file, progress_interval=100
                 positions.append(record.pos)
                 refs.append(record.ref)
 
-                for cell_idx, sample_name in enumerate(samples):
+                for cell_idx, sample_name in cell_iter:
                     sample = record.samples[sample_name]
                     dp_val = sample.get('DP')
                     ad_val = sample.get('AD')
@@ -343,12 +518,15 @@ def read_cellsnp_vcf_to_matrices_pysam_sparse(vcf_gz_file, progress_interval=100
 
     else:
         # Original path: load all variants
+        if n_jobs and n_jobs > 1:
+            print("  Note: n_jobs only parallelizes the target_genes (indexed fetch) "
+                  "path; running the full scan single-threaded.")
         for i, record in enumerate(vcf):
             genes.append(record.chrom)
             positions.append(record.pos)
             refs.append(record.ref)
 
-            for cell_idx, sample_name in enumerate(samples):
+            for cell_idx, sample_name in cell_iter:
                 sample = record.samples[sample_name]
                 dp_val = sample.get('DP')
                 ad_val = sample.get('AD')
@@ -426,8 +604,8 @@ def read_cellsnp_vcf_to_matrices_pysam_sparse(vcf_gz_file, progress_interval=100
         print(f"Mutant count matrix shape: {ad_sparse.shape}")
 
     if include_mutant_counts:
-        return cov_sparse, mut_sparse, ad_sparse, position_info, samples
-    return cov_sparse, mut_sparse, position_info, samples
+        return cov_sparse, mut_sparse, ad_sparse, position_info, col_names
+    return cov_sparse, mut_sparse, position_info, col_names
 
 
 def read_cellsnp_base_vcf(vcf_file, include_oth=False, min_coverage=100):
