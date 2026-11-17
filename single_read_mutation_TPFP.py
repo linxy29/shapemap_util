@@ -234,7 +234,7 @@ def main():
                         help="repeatable; 'CONTIG=dotbracket:GENE' or 'CONTIG=csv:PATH:COL'")
     parser.add_argument('--dotbracket-file', default=None,
                         help="source file for 'dotbracket' structure specs")
-    parser.add_argument('-o', '--output-prefix', default='mut_structure')
+    parser.add_argument('-p', '--output-prefix', default='mut_structure')
     parser.add_argument('--output-dir', default='.')
     parser.add_argument('--junction-window', type=int, default=1,
                         help='paired base within this many nt of a "." is a junction (default 1)')
