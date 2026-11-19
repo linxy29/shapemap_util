@@ -1205,6 +1205,7 @@ class ShapeData:
     def plot_reactivity_distribution(
         self,
         color_by: Optional[str] = None,
+        group_by: Optional[str] = None,
         use_normalized: bool = False,
         cells: Optional[List[str]] = None,
         gene: Optional[str] = None,
@@ -1212,16 +1213,19 @@ class ShapeData:
         ncols: int = 4,
         figsize: Optional[Tuple[int, int]] = None,
         palette: Optional[str] = 'Set2',
-        fill: bool = True,
+        fill: bool = False,
         sharex: bool = True,
+        xlim: Optional[Tuple[float, float]] = (-0.05, 0.15),
         title: Optional[str] = None,
         **kwargs
     ) -> Any:
         """
-        Plot the distribution of reactivity values for each cell as a grid of KDE plots.
+        Plot the distribution of reactivity values as a grid of KDE plots.
 
-        Creates one subplot per cell, each a kernel density estimate of that cell's
-        reactivity values across positions (NaN dropped). When ``color_by`` is given,
+        By default creates one subplot per cell, each a kernel density estimate of
+        that cell's reactivity values across positions (NaN dropped). When
+        ``group_by`` is given, cells sharing the same value in that metadata column
+        are drawn as separate curves in one subplot. When ``color_by`` is given,
         each cell's curve is colored by its value in that metadata column, with a
         shared figure legend.
 
@@ -1230,6 +1234,9 @@ class ShapeData:
         color_by : str, optional
             Column in cells metadata used to color each cell's KDE. If None, a single
             default color is used.
+        group_by : str, optional
+            Column in cells metadata used to group cells into subplots (one subplot
+            per group, one curve per cell). If None, one subplot per cell.
         use_normalized : bool
             If True, use normalized_reactivity; otherwise use raw reactivity (default: False).
         cells : list of str, optional
@@ -1245,9 +1252,12 @@ class ShapeData:
         palette : str, optional
             Color palette name for ``color_by`` groups (default: 'Set2').
         fill : bool
-            Whether to fill under each KDE curve (default: True).
+            Whether to fill under each KDE curve (default: False).
         sharex : bool
             Whether subplots share the same x-axis (default: True).
+        xlim : tuple of (float, float), optional
+            x-axis limits applied to every subplot (default: (-0.05, 0.15)).
+            Pass None to autoscale.
         title : str, optional
             Overall figure title.
         **kwargs
@@ -1256,11 +1266,11 @@ class ShapeData:
         Returns:
         --------
         numpy.ndarray of matplotlib.axes.Axes
-            Array of the axes objects used (one per plotted cell).
+            Array of the axes objects used (one per subplot).
         """
         return _plot_reactivity_distribution(
-            self, color_by, use_normalized, cells, gene, pos_range, ncols,
-            figsize, palette, fill, sharex, title, **kwargs
+            self, color_by, group_by, use_normalized, cells, gene, pos_range, ncols,
+            figsize, palette, fill, sharex, xlim, title, **kwargs
         )
 
     def plot_mutrate_distribution(

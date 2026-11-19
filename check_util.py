@@ -57,3 +57,34 @@ def read_dot_bracket(file_path, gene_name):
     except Exception as e:
         print(f"Error reading file: {e}")
         return None
+
+def dotbracket_to_label(dotbracket, include_junction=True):
+    """
+    Turn a dot-bracket string into a positive(1.0)/negative(0.0) label per position.
+
+    Positive = unpaired ('.', plus any non-'()' symbol such as '<' '>' kept as in the 18S csv) and,
+    when include_junction is True, junction positions: a paired base ('(' or ')') that sits directly
+    next to a '.'. This is the same rule as the singleread_TPFP `positions.tsv` (is_positive =
+    is_unpaired OR is_junction). Negative = every other paired base.
+
+    Parameters
+    ----------
+    dotbracket : str or sequence of str
+        One symbol per position, ordered by position (1-based pos = index + 1).
+    include_junction : bool
+        False gives the old unpaired-only label.
+
+    Returns
+    -------
+    list of float
+    """
+    sym = list(dotbracket)
+    n = len(sym)
+    labels = []
+    for i, s in enumerate(sym):
+        if s not in '()':
+            labels.append(1.0)
+            continue
+        is_junction = include_junction and ((i > 0 and sym[i - 1] == '.') or (i < n - 1 and sym[i + 1] == '.'))
+        labels.append(1.0 if is_junction else 0.0)
+    return labels

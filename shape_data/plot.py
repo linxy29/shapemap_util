@@ -777,6 +777,7 @@ def plot_reactivity(
 def plot_reactivity_distribution(
     data: 'ShapeData',
     color_by: Optional[str] = None,
+    group_by: Optional[str] = None,
     use_normalized: bool = False,
     cells: Optional[List[str]] = None,
     gene: Optional[str] = None,
@@ -784,18 +785,21 @@ def plot_reactivity_distribution(
     ncols: int = 4,
     figsize: Optional[Tuple[int, int]] = None,
     palette: Optional[str] = 'Set2',
-    fill: bool = True,
+    fill: bool = False,
     sharex: bool = True,
+    xlim: Optional[Tuple[float, float]] = (-0.05, 0.15),
     title: Optional[str] = None,
     **kwargs
 ) -> Any:
     """
-    Plot the distribution of reactivity values for each cell as a grid of KDE plots.
+    Plot the distribution of reactivity values as a grid of KDE plots.
 
-    Creates one subplot per cell, each showing a kernel density estimate of that
-    cell's reactivity values across positions (NaN values are dropped). When
-    ``color_by`` is given, each cell's curve is colored by the cell's value in that
-    metadata column, with a shared figure legend.
+    By default creates one subplot per cell, each showing a kernel density estimate
+    of that cell's reactivity values across positions (NaN values are dropped).
+    When ``group_by`` is given, cells sharing the same value in that metadata column
+    are drawn as separate curves in the same subplot (one subplot per group).
+    When ``color_by`` is given, each cell's curve is colored by the cell's value in
+    that metadata column, with a shared figure legend.
 
     Parameters:
     -----------
@@ -805,6 +809,10 @@ def plot_reactivity_distribution(
     color_by : str, optional
         Column name in cells metadata used to color each cell's KDE. If None,
         all curves use a single default color.
+    group_by : str, optional
+        Column name in cells metadata used to group cells into subplots. All cells
+        sharing a value get one subplot with one KDE curve per cell. If None,
+        each cell gets its own subplot (default).
     use_normalized : bool
         If True, use normalized_reactivity; otherwise use raw reactivity
         (default: False).
@@ -823,9 +831,12 @@ def plot_reactivity_distribution(
     palette : str, optional
         Color palette name used to map ``color_by`` groups to colors (default: 'Set2').
     fill : bool
-        Whether to fill the area under each KDE curve (default: True).
+        Whether to fill the area under each KDE curve (default: False).
     sharex : bool
         Whether subplots share the same x-axis (default: True).
+    xlim : tuple of (float, float), optional
+        x-axis limits applied to every subplot (default: (-0.05, 0.15)).
+        Pass None to let matplotlib autoscale.
     title : str, optional
         Overall figure title.
     **kwargs
@@ -834,12 +845,15 @@ def plot_reactivity_distribution(
     Returns:
     --------
     numpy.ndarray of matplotlib.axes.Axes
-        Array of the axes objects used (one per plotted cell).
+        Array of the axes objects used (one per subplot).
 
     Example:
     --------
     >>> # One KDE per cell, colored by RBP
     >>> data.plot_reactivity_distribution(color_by='RBP')
+    >>>
+    >>> # One subplot per RBP, one curve per metacell of that RBP
+    >>> data.plot_reactivity_distribution(group_by='RBP', color_by='RBP', ncols=3)
     >>>
     >>> # Restrict to a gene and a subset of cells
     >>> data.plot_reactivity_distribution(color_by='RBP', gene='18S',
@@ -918,8 +932,30 @@ def plot_reactivity_distribution(
         group_color = {g: colors[i] for i, g in enumerate(unique_groups)}
         cell_colors = {idx: group_color[group_values[idx]] for idx in cell_indices}
 
+    # Build subplot groups: (subplot title, [cell column indices])
+    if group_by is not None:
+        if not data.cells_is_df:
+            raise ValueError("cells must be a DataFrame to use group_by")
+        if group_by not in data.cells.columns:
+            raise ValueError(f"group_by column '{group_by}' not found in cells. "
+                             f"Available: {list(data.cells.columns)}")
+        subplot_values = data.cells[group_by].values
+        subplot_groups = []
+        for g in pd.unique(subplot_values[cell_indices]):
+            members = [idx for idx in cell_indices if subplot_values[idx] == g]
+            subplot_groups.append((str(g), members))
+    else:
+        subplot_groups = []
+        for idx in cell_indices:
+            cell_name = cell_names[idx]
+            if color_by is not None:
+                subtitle = f"{cell_name} ({data.cells[color_by].values[idx]})"
+            else:
+                subtitle = str(cell_name)
+            subplot_groups.append((subtitle, [idx]))
+
     # Grid layout
-    n_plots = len(cell_indices)
+    n_plots = len(subplot_groups)
     nrows = (n_plots + ncols - 1) // ncols
     if figsize is None:
         figsize = (4 * ncols, 3 * nrows)
@@ -927,28 +963,35 @@ def plot_reactivity_distribution(
     fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False, sharex=sharex)
     axes = axes.flatten()
 
-    for i, col in enumerate(cell_indices):
+    for i, (subtitle, members) in enumerate(subplot_groups):
         ax = axes[i]
-        values = react_sub[:, col]
-        values = values[np.isfinite(values)]
+        n_drawn = 0
 
-        color = cell_colors[col] if cell_colors is not None else 'steelblue'
+        for col in members:
+            values = react_sub[:, col]
+            values = values[np.isfinite(values)]
 
-        cell_name = cell_names[col]
-        if color_by is not None:
-            subtitle = f"{cell_name} ({data.cells[color_by].values[col]})"
-        else:
-            subtitle = str(cell_name)
+            color = cell_colors[col] if cell_colors is not None else 'steelblue'
 
-        # KDE needs at least 2 distinct finite values
-        if values.size < 2 or np.unique(values).size < 2:
+            # KDE needs at least 2 distinct finite values
+            if values.size < 2 or np.unique(values).size < 2:
+                continue
+            sns.kdeplot(x=values, ax=ax, color=color, fill=fill,
+                        label=str(cell_names[col]), **kwargs)
+            n_drawn += 1
+
+        if n_drawn == 0:
             ax.text(0.5, 0.5, 'insufficient data', ha='center', va='center',
                     transform=ax.transAxes, fontsize='small', color='gray')
-        else:
-            sns.kdeplot(x=values, ax=ax, color=color, fill=fill, **kwargs)
+
+        # Per-subplot legend of cell names when several cells share a subplot
+        if group_by is not None and 1 < n_drawn <= 10:
+            ax.legend(fontsize='x-small')
 
         ax.set_title(subtitle, fontsize='small')
         ax.set_xlabel(value_label)
+        if xlim is not None:
+            ax.set_xlim(xlim)
 
     # Hide unused subplots
     for i in range(n_plots, len(axes)):

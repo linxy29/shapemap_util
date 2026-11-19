@@ -640,3 +640,333 @@ def read_mutrate_files(directory_path='.', prefix ='', output_file=None, header=
         print(f"  - Saved to: {output_file}")
     
     return final_df
+
+def lookup_window_region(regions_df, gene, window_start, window_end, symbol_col='symbol'):
+    """
+    Assign one window to the 5'UTR, CDS or 3'UTR it overlaps most, and return that region's extent.
+
+    Coordinates are 1-based inclusive TRANSCRIPT coordinates on both sides, which is what
+    gencode.vM38.selected.transcript.regions.csv stores and what a BAM aligned straight to the
+    selected transcript FASTA already reports, so no genomic projection happens here.
+
+    Parameters:
+    -----------
+    regions_df : pandas.DataFrame
+        Transcript region table, one row per transcript, with symbol_col, 'biotype', 'length' and the
+        'utr5_start'/'utr5_end', 'cds_start'/'cds_end', 'utr3_start'/'utr3_end' pairs. A region the
+        transcript does not have is left blank.
+    gene : str
+        Transcript to look up, matched against symbol_col.
+    window_start, window_end : int
+        Window extent, 1-based inclusive.
+    symbol_col : str, default 'symbol'
+        Column of regions_df holding the transcript name.
+
+    Returns:
+    --------
+    dict with:
+        region : "5'UTR", 'CDS', "3'UTR", 'noncoding', 'unassigned' or 'no_annotation'
+        region_start, region_end : extent of that region, or None when there is no extent to give
+        overlap : nucleotides the window shares with the winning region
+        n_regions_touched : how many of the three the window overlaps at all
+        is_boundary_window : True when the window straddles more than one region
+        biotype, length : copied from regions_df, or None when the transcript is absent
+    """
+    import pandas as pd
+
+    gene_rows = regions_df[regions_df[symbol_col] == gene]
+    if gene_rows.empty:
+        return {'region': 'no_annotation', 'region_start': None, 'region_end': None, 'overlap': 0,
+                'n_regions_touched': 0, 'is_boundary_window': False, 'biotype': None, 'length': None}
+    row = gene_rows.iloc[0]
+
+    ## Overlap in nucleotides between the window and each region, on the same 1-based inclusive
+    ## convention; a region the transcript does not have (blank start/end) contributes 0.
+    overlaps = []
+    for region_name, start_col, end_col in [("5'UTR", 'utr5_start', 'utr5_end'),
+                                            ('CDS', 'cds_start', 'cds_end'),
+                                            ("3'UTR", 'utr3_start', 'utr3_end')]:
+        region_start, region_end = row[start_col], row[end_col]
+        if pd.isna(region_start) or pd.isna(region_end):
+            overlaps.append((region_name, 0, None, None))
+            continue
+        region_start, region_end = int(region_start), int(region_end)
+        overlap = min(window_end, region_end) - max(window_start, region_start) + 1
+        overlaps.append((region_name, max(overlap, 0), region_start, region_end))
+
+    ## MAX overlap wins, the same rule the bin annotation in the notebooks uses, so a title can never
+    ## disagree with the table. Ties break toward the earlier region in 5' -> 3' order, which is what
+    ## max() over a list in that order already does.
+    region_name, overlap, region_start, region_end = max(overlaps, key=lambda item: item[1])
+    n_regions_touched = sum(1 for _, region_overlap, _, _ in overlaps if region_overlap > 0)
+
+    if overlap == 0:
+        ## No overlap with any of the three: a noncoding transcript has no CDS to sit in, while a
+        ## coding one means the window runs past the annotated end of the transcript.
+        region_name = 'noncoding' if row['biotype'] == 'noncoding' else 'unassigned'
+        region_start = region_end = None
+
+    return {'region': region_name, 'region_start': region_start, 'region_end': region_end,
+            'overlap': overlap, 'n_regions_touched': n_regions_touched,
+            'is_boundary_window': n_regions_touched > 1,
+            'biotype': row['biotype'], 'length': row['length']}
+
+
+## Colours of the 5'UTR / CDS / 3'UTR track drawn along the top of a window panel. Deliberately
+## clear of the gold window band and of the red/grey reactivity lines, so the track reads as
+## structure and not as another series.
+REGION_TRACK_COLORS = {"5'UTR": '#4C72B0', 'CDS': '#55A868', "3'UTR": '#8172B2'}
+
+
+def transcript_region_extents(regions_df, gene, symbol_col='symbol'):
+    """
+    Return the 5'UTR / CDS / 3'UTR extents of one transcript, 5' -> 3', skipping the ones it lacks.
+
+    Same table and same 1-based inclusive transcript coordinates as lookup_window_region, which
+    assigns a single window to one region; this one hands back all of them so a panel can draw the
+    whole structure rather than only the region its window sits in.
+
+    Returns:
+    --------
+    list of (region_name, start, end), ordered by start. Empty when the transcript is absent from
+    regions_df or carries no annotated region (a noncoding transcript with blank CDS/UTR columns).
+    """
+    import pandas as pd
+
+    gene_rows = regions_df[regions_df[symbol_col] == gene]
+    if gene_rows.empty:
+        return []
+    row = gene_rows.iloc[0]
+
+    extents = []
+    for region_name, start_col, end_col in [("5'UTR", 'utr5_start', 'utr5_end'),
+                                            ('CDS', 'cds_start', 'cds_end'),
+                                            ("3'UTR", 'utr3_start', 'utr3_end')]:
+        region_start, region_end = row[start_col], row[end_col]
+        if pd.isna(region_start) or pd.isna(region_end):
+            continue
+        extents.append((region_name, int(region_start), int(region_end)))
+    return sorted(extents, key=lambda item: item[1])
+
+
+def plot_window_reactivity(reactivity_df, low_corr_df, row_idx, flank=50,
+                           group_col='cell_type', control_label='bulk', method_label='',
+                           y_col='smoothed_reactivity', unit_col='biorep_celltype',
+                           pos_col='pos', gene_col='gene',
+                           coverage_col='coverage_signal',
+                           zoom_range=None, views=('whole', 'zoom'),
+                           show=True, figsize=(12, 4), axes=None, regions_df=None,
+                           region_track=True, region_track_height=0.08):
+    """
+    Draw one flagged low-correlation window: the flagged group against the control.
+
+    Each axis plots one line per unit_col (e.g. biorep_celltype), coloured by whether that unit
+    belongs to the flagged group or to the control, with the flagged window shaded in gold. When the
+    frame carries coverage_col, the same units' read depth is drawn as grey dashed lines on a
+    log-scaled right hand axis, so a window can be read against the depth it was called on.
+
+    Parameters:
+    -----------
+    reactivity_df : pandas.DataFrame
+        Per-position reactivity, with gene_col, pos_col, group_col, unit_col and y_col. May be the
+        full frame or a slice already cut down to this gene and the two groups - the gene/group mask
+        below is applied either way and is a no-op on a slice. Callers drawing many windows should
+        pass the slice: masking a ~1e7-row frame once per window dominates the runtime.
+    low_corr_df : pandas.DataFrame
+        Flagged windows, with gene_col, group_col, 'window_start' and 'window_end'.
+    row_idx : label
+        Index label of the row of low_corr_df to draw.
+    flank : int, default 50
+        Positions kept either side of the window in the zoom view, when zoom_range is not given.
+    group_col : str, default 'cell_type'
+        Column holding the flagged group and the control.
+    control_label : str, default 'bulk'
+        Value of group_col the flagged group is drawn against.
+    method_label : str, default ''
+        Free-text tag prefixed to the panel title, e.g. the correlation method or the panel name.
+    y_col, unit_col, pos_col, gene_col : str
+        Column names for the plotted value, the line unit, the position and the gene.
+    coverage_col : str or None, default 'coverage_signal'
+        Column holding the read depth, drawn as a grey dashed line per unit on a log-scaled right
+        hand axis. None turns the overlay off, and so does a frame that does not carry the column -
+        a caller reading the reactivity CSV with usecols has to ask for the coverage column to get
+        the line. Positions at zero depth break the line. The right hand axis is scaled per panel,
+        so panels sharing a reactivity y axis do NOT share the coverage one.
+    zoom_range : (int, int) or None, default None
+        Explicit (start, end) for the zoom view, overriding flank. Several windows drawn on one
+        shared range stay directly comparable.
+    views : tuple, default ('whole', 'zoom')
+        Which of the two views to draw, always in whole -> zoom order.
+    show : bool, default True
+        Call plt.show() at the end. Ignored when axes is given.
+    figsize : tuple, default (12, 4)
+        Size of each figure created. Ignored when axes is given.
+    regions_df : pandas.DataFrame or None, default None
+        Transcript region table for lookup_window_region. When given, every panel title gains the
+        5'UTR / CDS / 3'UTR the window sits in and that region's extent, and - unless region_track
+        is turned off - every panel also gains the coloured region track described below.
+    region_track : bool, default True
+        Draw a coloured 5'UTR / CDS / 3'UTR bar along the top of each panel, with a dashed line at
+        every region boundary that falls inside the view, so the gold window band can be read
+        against the transcript structure and not only against its own coordinates. Needs regions_df;
+        without it nothing is drawn. Regions are clipped to the view, so a region running past the
+        edge gets a bar and no boundary line on that side.
+    region_track_height : float, default 0.08
+        Height of that track as a fraction of the axis, measured down from the top. The track is
+        drawn over the data rather than beside it, so a taller track hides more of the curves.
+    axes : list of matplotlib axes or None, default None
+        One ready-made axis per entry of views, in that order, so the caller can lay several panels
+        of the same window out on one figure. No figure is created in that case and the caller owns
+        the layout.
+
+    Returns:
+    --------
+    list of (ax, coverage_ax) tuples, one per drawn view, in whole -> zoom order. coverage_ax is the
+    right hand axis carrying the depth lines, or None where the overlay was not drawn.
+    """
+    from matplotlib import pyplot as plt
+
+    row = low_corr_df.loc[row_idx]
+    gene = row[gene_col]
+    win_start, win_end = row['window_start'], row['window_end']
+    flagged_group = row[group_col]
+    title_prefix = f'[{method_label}] ' if method_label else ''
+
+    gene_df = reactivity_df[(reactivity_df[gene_col] == gene) &
+                            (reactivity_df[group_col].isin([flagged_group, control_label]))]
+    if gene_df.empty:
+        raise ValueError(f"No reactivity data found for gene {gene!r}")
+
+    palette = {flagged_group: 'tab:red', control_label: 'tab:grey'}
+
+    ## Which transcript region the window sits in and how far that region runs, resolved once and
+    ## appended to every panel title so the window can be read in context.
+    region_label = ''
+    if regions_df is not None:
+        window_region = lookup_window_region(regions_df, gene, win_start, win_end)
+        region_label = f" | {window_region['region']}"
+        if window_region['region_start'] is not None:
+            region_label += f" {window_region['region_start']}-{window_region['region_end']}"
+        if window_region['is_boundary_window']:
+            region_label += f" (straddles {window_region['n_regions_touched']} regions)"
+
+    ## The whole 5' -> 3' structure, resolved once for every panel: the track below clips it to the
+    ## view, so the same list serves the whole-transcript and the zoom panel.
+    region_extents = (transcript_region_extents(regions_df, gene)
+                      if regions_df is not None and region_track else [])
+
+    ## The two views differ only in which positions they keep, what the title calls them and whether
+    ## the x axis is pinned, so they are specced here and drawn by one loop below.
+    if zoom_range is None:
+        zoom_start, zoom_end = win_start - flank, win_end + flank
+        zoom_label = f'zoom {win_start}-{win_end} ±{flank}'
+    else:
+        zoom_start, zoom_end = zoom_range
+        zoom_label = f'window {win_start}-{win_end}, view {zoom_start}-{zoom_end}'
+    zoom_df = gene_df[(gene_df[pos_col] >= zoom_start) & (gene_df[pos_col] <= zoom_end)]
+
+    ## The x limits are set from the range and not from the data, so windows drawn on a shared range
+    ## stay comparable even where a unit has no data out to the edge.
+    ## The whole view has no pinned x limits, so its visible range is taken from the data - that is
+    ## what matplotlib will autoscale to, give or take the margins, and it is what the region track
+    ## has to be clipped and labelled against.
+    view_specs = {
+        'whole': (gene_df, 'whole transcript', None,
+                  (gene_df[pos_col].min(), gene_df[pos_col].max())),
+        'zoom': (zoom_df, zoom_label, (zoom_start, zoom_end), (zoom_start, zoom_end)),
+    }
+
+    ## Drawn only when the frame actually carries the column: callers cutting the reactivity CSV down
+    ## with usecols routinely leave coverage out, and a missing overlay is the honest answer there.
+    draw_coverage = coverage_col is not None and coverage_col in gene_df.columns
+
+    def draw_panel(ax, sub_df, view_label, view_range):
+        ## Depth first and on its own axis, so the reactivity curves the panel is about stay on top of
+        ## it. zorder is set on the axis itself because a twin axis is drawn as a whole, above or
+        ## below the host, and not per artist.
+        coverage_ax = None
+        if draw_coverage:
+            coverage_ax = ax.twinx()
+            for _, unit_df in sub_df.groupby([unit_col, group_col]):
+                unit_df = unit_df.sort_values(pos_col)
+                ## Depth spans orders of magnitude within a transcript, so the axis is log and not the
+                ## values: the ticks stay in real reads and a shallow unit is still readable next to a
+                ## deep one. A zero-depth position has no log, and is left as a gap in the line rather
+                ## than dropped, which would join the two sides across it.
+                coverage_ax.plot(unit_df[pos_col], unit_df[coverage_col].where(unit_df[coverage_col] > 0),
+                                 color='dimgrey', linestyle='--', alpha=0.5, linewidth=1)
+            coverage_ax.set_yscale('log')
+            coverage_ax.set_ylabel(f'{coverage_col} (log)', color='dimgrey')
+            coverage_ax.tick_params(axis='y', labelcolor='dimgrey', labelsize=8)
+            ax.set_zorder(coverage_ax.get_zorder() + 1)
+            ax.patch.set_visible(False)
+
+        for (unit, group), unit_df in sub_df.groupby([unit_col, group_col]):
+            unit_df = unit_df.sort_values(pos_col)
+            ax.plot(unit_df[pos_col], unit_df[y_col],
+                    color=palette.get(group, 'tab:blue'), alpha=0.7, linewidth=1)
+        ax.axvspan(win_start, win_end, color='gold', alpha=0.25, zorder=0)
+
+        ## Region track along the top: one bar per region that reaches into the view, clipped to it,
+        ## plus a dashed line at each boundary inside the view. Drawn in axes fraction so it keeps
+        ## its height whatever the reactivity y range is, and on ax rather than on the coverage twin
+        ## so it stays above the depth lines.
+        view_start, view_end = view_range
+        track_bottom = 1.0 - region_track_height
+        drawn_regions = []
+        for region_name, region_start, region_end in region_extents:
+            bar_start, bar_end = max(region_start, view_start), min(region_end, view_end)
+            if bar_start >= bar_end:
+                continue
+            region_color = REGION_TRACK_COLORS.get(region_name, 'tab:blue')
+            ax.axvspan(bar_start, bar_end, ymin=track_bottom, ymax=1.0,
+                       color=region_color, alpha=0.35, zorder=2)
+            drawn_regions.append((region_name, region_color))
+            ## A sliver of a region has no room for its own name; the legend still carries it.
+            if (bar_end - bar_start) > 0.08 * (view_end - view_start):
+                ax.annotate(region_name, xy=((bar_start + bar_end) / 2, 1.0 - region_track_height / 2),
+                            xycoords=('data', 'axes fraction'), ha='center', va='center',
+                            fontsize=8, color=region_color, zorder=3)
+            for boundary in (region_start, region_end):
+                if view_start <= boundary <= view_end:
+                    ax.axvline(boundary, color=region_color, linestyle='--',
+                               alpha=0.6, linewidth=1, zorder=1)
+
+        ax.set_xlabel('Position')
+        ax.set_ylabel(y_col)
+        ax.set_title(f'{title_prefix}{gene} — {flagged_group} vs {control_label} '
+                     f'({view_label}){region_label}')
+        legend_handles = [plt.Line2D([0], [0], color=color, lw=2, label=group)
+                          for group, color in palette.items()
+                          if group in sub_df[group_col].unique()]
+        if draw_coverage:
+            legend_handles.append(plt.Line2D([0], [0], color='dimgrey', lw=1, linestyle='--',
+                                             label=f'{coverage_col} (log)'))
+        legend_handles.extend(plt.Rectangle((0, 0), 1, 1, color=region_color, alpha=0.35,
+                                            label=region_name)
+                              for region_name, region_color in drawn_regions)
+        if legend_handles:
+            ax.legend(handles=legend_handles, fontsize=8, loc='best')
+        return coverage_ax
+
+    supplied_axes = list(axes) if axes is not None else None
+    axes_list = []
+    for view in ('whole', 'zoom'):        # fixed order, so supplied axes line up with `views`
+        if view not in views:
+            continue
+        view_df, view_label, xlim, view_range = view_specs[view]
+        if supplied_axes is None:
+            fig, ax = plt.subplots(figsize=figsize)
+        else:
+            fig, ax = None, supplied_axes.pop(0)
+        coverage_ax = draw_panel(ax, view_df, view_label, view_range)
+        if xlim is not None:
+            ax.set_xlim(*xlim)
+        if fig is not None:
+            fig.tight_layout()
+        axes_list.append((ax, coverage_ax))
+
+    if show and axes is None:
+        plt.show()
+
+    return axes_list
